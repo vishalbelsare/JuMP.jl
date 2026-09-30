@@ -19,6 +19,21 @@
     UnorderedPair(a::T, b::T)
 
 A wrapper type used by [`GenericQuadExpr`](@ref) with fields `.a` and `.b`.
+
+## Example
+
+```jldoctest
+julia> model = Model();
+
+julia> @variable(model, x[1:2]);
+
+julia> expr = 2.0 * x[1] * x[2]
+2 x[1]*x[2]
+
+julia> expr.terms
+OrderedCollections.OrderedDict{UnorderedPair{VariableRef}, Float64} with 1 entry:
+  UnorderedPair{VariableRef}(x[1], x[2]) => 2.0
+```
 """
 struct UnorderedPair{T}
     a::T
@@ -45,10 +60,44 @@ An expression type representing an quadratic expression of the form:
    expression.
  * `.terms`: an `OrderedDict`, with keys of `UnorderedPair{VarType}` and
    values of `CoefType`, describing the sparse list of terms `q`.
+
+## Example
+
+```jldoctest
+julia> model = Model();
+
+julia> @variable(model, x[1:2]);
+
+julia> expr = 2.0 * x[1]^2 + x[1] * x[2] + 3.0 * x[1] + 4.0
+2 x[1]² + x[1]*x[2] + 3 x[1] + 4
+
+julia> expr.aff
+3 x[1] + 4
+
+julia> expr.terms
+OrderedCollections.OrderedDict{UnorderedPair{VariableRef}, Float64} with 2 entries:
+  UnorderedPair{VariableRef}(x[1], x[1]) => 2.0
+  UnorderedPair{VariableRef}(x[1], x[2]) => 1.0
+```
 """
 mutable struct GenericQuadExpr{CoefType,VarType} <: AbstractJuMPScalar
     aff::GenericAffExpr{CoefType,VarType}
     terms::OrderedDict{UnorderedPair{VarType},CoefType}
+end
+
+variable_ref_type(::Type{GenericQuadExpr{C,V}}) where {C,V} = V
+
+value_type(::Type{GenericQuadExpr{C,V}}) where {C,V} = C
+
+function owner_model(x::GenericQuadExpr)
+    model = owner_model(x.aff)
+    if model !== nothing
+        return model
+    elseif !isempty(x.terms)
+        pair = first(keys(x.terms))
+        return owner_model(pair.a)
+    end
+    return nothing
 end
 
 """
@@ -62,7 +111,11 @@ vector of ([`UnorderedPair`](@ref), coefficient) pairs.
 
 ## Example
 
-```jldoctest; setup=:(using JuMP; model = Model(); @variable(model, x))
+```jldoctest
+julia> model = Model();
+
+julia> @variable(model, x);
+
 julia> GenericQuadExpr(GenericAffExpr(1.0, x => 2.0), [UnorderedPair(x, x) => 3.0])
 3 x² + 2 x + 1
 ```
@@ -84,13 +137,6 @@ function GenericQuadExpr(
     )
 end
 
-function GenericAffExpr{V,K}(
-    aff::GenericAffExpr{V,K},
-    kv::AbstractArray{<:Pair},
-) where {K,V}
-    return GenericQuadExpr{V,K}(aff, _new_ordered_dict(UnorderedPair{K}, V, kv))
-end
-
 function GenericQuadExpr{V,K}(aff::GenericAffExpr{V,K}, kv::Pair...) where {K,V}
     return GenericQuadExpr{V,K}(
         aff,
@@ -98,36 +144,83 @@ function GenericQuadExpr{V,K}(aff::GenericAffExpr{V,K}, kv::Pair...) where {K,V}
     )
 end
 
+function GenericQuadExpr(
+    aff::GenericAffExpr{T,V},
+    quad::OrderedDict{UnorderedPair{V},S},
+) where {T,S,V}
+    C = promote_type(T, S)
+    return GenericQuadExpr(
+        convert(GenericAffExpr{C,V}, aff),
+        convert(OrderedDict{UnorderedPair{V},C}, quad),
+    )
+end
+
 function Base.iszero(expr::GenericQuadExpr)
     return iszero(expr.aff) && all(iszero, values(expr.terms))
 end
+
 function Base.zero(::Type{GenericQuadExpr{C,V}}) where {C,V}
     return GenericQuadExpr(
         zero(GenericAffExpr{C,V}),
         OrderedDict{UnorderedPair{V},C}(),
     )
 end
+
 function Base.one(::Type{GenericQuadExpr{C,V}}) where {C,V}
     return GenericQuadExpr(
         one(GenericAffExpr{C,V}),
         OrderedDict{UnorderedPair{V},C}(),
     )
 end
+
 Base.zero(q::GenericQuadExpr) = zero(typeof(q))
 Base.one(q::GenericQuadExpr) = one(typeof(q))
 Base.copy(q::GenericQuadExpr) = GenericQuadExpr(copy(q.aff), copy(q.terms))
 Base.broadcastable(q::GenericQuadExpr) = Ref(q)
 
-# Needed for cases when Julia uses `x == 0` instead of `iszero(x)` (e.g., in the
-# stdlib).
+Base.conj(a::GenericQuadExpr{<:Real}) = a
+Base.real(a::GenericQuadExpr{<:Real}) = a
+Base.imag(a::GenericQuadExpr{<:Real}) = zero(a)
+Base.isreal(::GenericQuadExpr{<:Real}) = true
+
+Base.conj(a::GenericQuadExpr{<:Complex}) = map_coefficients(conj, a)
+Base.real(a::GenericQuadExpr{<:Complex}) = map_coefficients(real, a)
+Base.imag(a::GenericQuadExpr{<:Complex}) = map_coefficients(imag, a)
+
+function Base.isreal(x::GenericQuadExpr{<:Complex})
+    return isreal(x.aff) && all(isreal, values(x.terms))
+end
+
+# Needed for cases when Julia uses `x == 0` instead of `iszero(x)` (for example,
+# in the stdlib).
 Base.:(==)(x::GenericQuadExpr, y::Number) = isempty(x.terms) && x.aff == y
 
 """
-    coefficient(a::GenericAffExpr{C,V}, v1::V, v2::V) where {C,V}
+    coefficient(a::GenericQuadExpr{C,V}, v1::V, v2::V) where {C,V}
 
-Return the coefficient associated with the term `v1 * v2` in the quadratic expression `a`.
+Return the coefficient associated with the term `v1 * v2` in the quadratic
+expression `a`.
 
 Note that `coefficient(a, v1, v2)` is the same as `coefficient(a, v2, v1)`.
+
+## Example
+
+```jldoctest
+julia> model = Model();
+
+julia> @variable(model, x[1:2]);
+
+julia> expr = 2.0 * x[1] * x[2];
+
+julia> coefficient(expr, x[1], x[2])
+2.0
+
+julia> coefficient(expr, x[2], x[1])
+2.0
+
+julia> coefficient(expr, x[1], x[1])
+0.0
+```
 """
 function coefficient(q::GenericQuadExpr{C,V}, v1::V, v2::V) where {C,V}
     return get(q.terms, UnorderedPair(v1, v2), zero(C))
@@ -136,7 +229,21 @@ end
 """
     coefficient(a::GenericQuadExpr{C,V}, v::V) where {C,V}
 
-Return the coefficient associated with variable `v` in the affine component of `a`.
+Return the coefficient associated with variable `v` in the affine component of
+`a`.
+
+## Example
+
+```jldoctest
+julia> model = Model();
+
+julia> @variable(model, x);
+
+julia> expr = 2.0 * x^2 + 3.0 * x;
+
+julia> coefficient(expr, x)
+3.0
+```
 """
 coefficient(q::GenericQuadExpr{C,V}, v::V) where {C,V} = coefficient(q.aff, v)
 
@@ -144,14 +251,28 @@ coefficient(q::GenericQuadExpr{C,V}, v::V) where {C,V} = coefficient(q.aff, v)
     drop_zeros!(expr::GenericQuadExpr)
 
 Remove terms in the quadratic expression with `0` coefficients.
+
+## Example
+
+```jldoctest
+julia> model = Model();
+
+julia> @variable(model, x[1:2]);
+
+julia> expr = x[1]^2 + x[2]^2;
+
+julia> add_to_expression!(expr, -1.0, x[1], x[1])
+0 x[1]² + x[2]²
+
+julia> drop_zeros!(expr)
+
+julia> expr
+x[2]²
+```
 """
 function drop_zeros!(expr::GenericQuadExpr)
     drop_zeros!(expr.aff)
-    for (key, coef) in expr.terms
-        if iszero(coef)
-            delete!(expr.terms, key)
-        end
-    end
+    _drop_zeros!(expr.terms)
     return
 end
 
@@ -165,7 +286,11 @@ See also: [`map_coefficients`](@ref)
 
 ## Example
 
-```jldoctest; setup=:(using JuMP; model = Model(); @variable(model, x))
+```jldoctest
+julia> model = Model();
+
+julia> @variable(model, x);
+
 julia> a = @expression(model, x^2 + x + 1)
 x² + x + 1
 
@@ -195,7 +320,11 @@ See also: [`map_coefficients_inplace!`](@ref)
 
 ## Example
 
-```jldoctest; setup=:(using JuMP; model = Model(); @variable(model, x))
+```jldoctest
+julia> model = Model();
+
+julia> @variable(model, x);
+
 julia> a = @expression(model, x^2 + x + 1)
 x² + x + 1
 
@@ -207,22 +336,47 @@ x² + x + 1
 ```
 """
 function map_coefficients(f::Function, q::GenericQuadExpr)
-    return map_coefficients_inplace!(f, copy(q))
+    # `map_coefficients(f, q.aff)` infers the coefficient type
+    # which is then picked up in the method signature of `_map_quad`
+    # and then used to build the `OrderedDict`.
+    return _map_quad(f, map_coefficients(f, q.aff), q)
 end
 
-function _affine_coefficient(f::GenericQuadExpr{C,V}, variable::V) where {C,V}
-    return _affine_coefficient(f.aff, variable)
+function _map_quad(
+    f::Function,
+    aff::GenericAffExpr{C,V},
+    q::GenericQuadExpr,
+) where {C,V}
+    terms = OrderedDict{UnorderedPair{V},C}()
+    sizehint!(terms, length(q.terms))
+    for (key, value) in q.terms
+        terms[key] = f(value)
+    end
+    return GenericQuadExpr(aff, terms)
 end
 
 """
-    constant(aff::GenericQuadExpr{C, V})::C
+    constant(quad::GenericQuadExpr{C,V})::C
 
 Return the constant of the quadratic expression.
+
+## Example
+
+```jldoctest
+julia> model = Model();
+
+julia> @variable(model, x);
+
+julia> quad = 2.0 * x^2 + 3.0;
+
+julia> constant(quad)
+3.0
+```
 """
 constant(quad::GenericQuadExpr) = constant(quad.aff)
 
 """
-    linear_terms(quad::GenericQuadExpr{C, V})
+    linear_terms(quad::GenericQuadExpr{C,V})
 
 Provides an iterator over tuples `(coefficient::C, variable::V)` in the
 linear part of the quadratic expression.
@@ -240,7 +394,7 @@ struct QuadTermIterator{GQE<:GenericQuadExpr}
 end
 
 """
-    quad_terms(quad::GenericQuadExpr{C, V})
+    quad_terms(quad::GenericQuadExpr{C,V})
 
 Provides an iterator over tuples `(coefficient::C, var_1::V, var_2::V)` in the
 quadratic part of the quadratic expression.
@@ -250,6 +404,7 @@ quad_terms(quad::GenericQuadExpr) = QuadTermIterator(quad)
 function _reorder_and_flatten(p::Pair{<:UnorderedPair})
     return (p.second, p.first.a, p.first.b)
 end
+
 function Base.iterate(qti::QuadTermIterator)
     ret = iterate(qti.quad.terms)
     if ret === nothing
@@ -258,6 +413,7 @@ function Base.iterate(qti::QuadTermIterator)
         return _reorder_and_flatten(ret[1]), ret[2]
     end
 end
+
 function Base.iterate(qti::QuadTermIterator, state)
     ret = iterate(qti.quad.terms, state)
     if ret === nothing
@@ -292,15 +448,23 @@ function add_to_expression!(
 end
 
 function add_to_expression!(
-    q::GenericQuadExpr{T,S},
-    other::GenericQuadExpr{T,S},
-) where {T,S}
+    q::GenericQuadExpr{T,V},
+    other::GenericQuadExpr{S,V},
+) where {T,S,V}
     merge!(+, q.terms, other.terms)
     add_to_expression!(q.aff, other.aff)
     return q
 end
 
 # With two factors.
+
+function add_to_expression!(
+    expr::GenericQuadExpr{C,V},
+    α::_Constant,
+    β::_Constant,
+) where {C,V}
+    return add_to_expression!(expr, *(α, β))
+end
 
 function add_to_expression!(
     quad::GenericQuadExpr{C,V},
@@ -320,30 +484,39 @@ function add_to_expression!(
 end
 
 function add_to_expression!(
-    quad::GenericQuadExpr{C},
+    quad::GenericQuadExpr{C,V},
+    new_coef::V,
+    new_var::V,
+) where {C,V<:Union{Number,LinearAlgebra.UniformScaling}}
+    add_to_expression!(quad.aff, new_coef, new_var)
+    return quad
+end
+
+function add_to_expression!(
+    quad::GenericQuadExpr,
     new_coef::_Constant,
-    new_aff::GenericAffExpr{C},
-) where {C}
+    new_aff::GenericAffExpr,
+)
     add_to_expression!(quad.aff, new_coef, new_aff)
     return quad
 end
 
 function add_to_expression!(
-    quad::GenericQuadExpr{C,V},
+    quad::GenericQuadExpr{S,V},
     coef::_Constant,
-    other::GenericQuadExpr{C,V},
-) where {C,V}
+    other::GenericQuadExpr{T,V},
+) where {S,T,V}
     for (key, term_coef) in other.terms
-        _add_or_set!(quad.terms, key, coef * term_coef)
+        _add_or_set!(quad.terms, key, convert(S, coef * term_coef))
     end
     return add_to_expression!(quad, coef, other.aff)
 end
 
 function add_to_expression!(
-    quad::GenericQuadExpr{C,V},
-    other::GenericQuadExpr{C,V},
+    quad::GenericQuadExpr,
+    other::GenericQuadExpr,
     coef::_Constant,
-) where {C,V}
+)
     return add_to_expression!(quad, coef, other)
 end
 
@@ -377,9 +550,17 @@ end
 
 function add_to_expression!(
     quad::GenericQuadExpr{C,V},
-    lhs::GenericAffExpr{C,V},
-    rhs::GenericAffExpr{C,V},
-) where {C,V}
+    aff::GenericAffExpr{C,V},
+    var::V,
+) where {C,V<:Union{Number,LinearAlgebra.UniformScaling}}
+    return add_to_expression!(quad, var, aff)
+end
+
+function add_to_expression!(
+    quad::GenericQuadExpr{C,V},
+    lhs::GenericAffExpr{S,V},
+    rhs::GenericAffExpr{T,V},
+) where {C,S,T,V}
     lhs_length = length(linear_terms(lhs))
     rhs_length = length(linear_terms(rhs))
 
@@ -425,7 +606,7 @@ end
 
 function add_to_expression!(
     quad::GenericQuadExpr{C,V},
-    new_coef::C,
+    new_coef::_Constant,
     new_var1::V,
     new_var2::V,
 ) where {C,V}
@@ -433,15 +614,24 @@ function add_to_expression!(
     # previous value for UnorderedPair(new_var2, new_var1), it's key will now be
     # UnorderedPair(new_var1, new_var2) (because these are defined as equal).
     key = UnorderedPair(new_var1, new_var2)
-    _add_or_set!(quad.terms, key, new_coef)
+    _add_or_set!(quad.terms, key, convert(C, new_coef))
     return quad
 end
 
 function _assert_isfinite(q::GenericQuadExpr)
     _assert_isfinite(q.aff)
     for (coef, var1, var2) in quad_terms(q)
-        isfinite(coef) ||
-            error("Invalid coefficient $coef on quadratic term $var1*$var2.")
+        if !isfinite(coef)
+            error(
+                """
+                Quadratic expression contains invalid term `$coef  * $var1 * $var2`.
+
+                The coefficients in an quadratic expression must be finite. \
+                They cannot be values like `NaN`, `Inf`, or `-Inf`. Check for \
+                division by zero or other sources of non-finite values.
+                """,
+            )
+        end
     end
 end
 
@@ -456,12 +646,8 @@ Base.hash(quad::GenericQuadExpr, h::UInt) = hash(quad.aff, hash(quad.terms, h))
 
 function SparseArrays.dropzeros(quad::GenericQuadExpr)
     quad_terms = copy(quad.terms)
-    for (key, value) in quad.terms
-        if iszero(value)
-            delete!(quad_terms, key)
-        end
-    end
-    return GenericQuadExpr(dropzeros(quad.aff), quad_terms)
+    _drop_zeros!(quad_terms)
+    return GenericQuadExpr(SparseArrays.dropzeros(quad.aff), quad_terms)
 end
 
 # Check if two QuadExprs are equal regardless of the order, and after dropping zeros.
@@ -470,8 +656,8 @@ function isequal_canonical(
     quad::GenericQuadExpr{CoefType,VarType},
     other::GenericQuadExpr{CoefType,VarType},
 ) where {CoefType,VarType}
-    quad_nozeros = dropzeros(quad)
-    other_nozeros = dropzeros(other)
+    quad_nozeros = SparseArrays.dropzeros(quad)
+    other_nozeros = SparseArrays.dropzeros(other)
     return isequal(quad_nozeros, other_nozeros)
 end
 
@@ -480,24 +666,35 @@ end
     QuadExpr
 
 An alias for `GenericQuadExpr{Float64,VariableRef}`, the specific
-    [`GenericQuadExpr`](@ref) used by JuMP.
+[`GenericQuadExpr`](@ref) used by JuMP.
 """
 const QuadExpr = GenericQuadExpr{Float64,VariableRef}
+
 function Base.convert(
     ::Type{GenericQuadExpr{C,V}},
     v::Union{_Constant,AbstractVariableRef,GenericAffExpr},
 ) where {C,V}
     return GenericQuadExpr(convert(GenericAffExpr{C,V}, v))
 end
-GenericQuadExpr{C,V}() where {C,V} = zero(GenericQuadExpr{C,V})
 
-function check_belongs_to_model(q::GenericQuadExpr, model::AbstractModel)
-    check_belongs_to_model(q.aff, model)
-    for variable_pair in keys(q.terms)
-        check_belongs_to_model(variable_pair.a, model)
-        check_belongs_to_model(variable_pair.b, model)
-    end
+function Base.convert(
+    ::Type{GenericQuadExpr{C,V}},
+    quad::GenericQuadExpr{C,V},
+) where {C,V}
+    return quad
 end
+
+function Base.convert(
+    ::Type{GenericQuadExpr{T,V}},
+    quad::GenericQuadExpr{S,V},
+) where {T,S,V}
+    return GenericQuadExpr{T,V}(
+        convert(GenericAffExpr{T,V}, quad.aff),
+        convert(OrderedDict{UnorderedPair{V},T}, quad.terms),
+    )
+end
+
+GenericQuadExpr{C,V}() where {C,V} = zero(GenericQuadExpr{C,V})
 
 """
     _moi_quadratic_term(t::Tuple)
@@ -513,24 +710,27 @@ function _moi_quadratic_term(t::Tuple)
         index(t[3]),
     )
 end
-function MOI.ScalarQuadraticFunction(q::QuadExpr)
+
+function MOI.ScalarQuadraticFunction(
+    q::GenericQuadExpr{C,GenericVariableRef{T}},
+) where {C,T}
     _assert_isfinite(q)
-    qterms = MOI.ScalarQuadraticTerm{Float64}[
+    qterms = MOI.ScalarQuadraticTerm{C}[
         _moi_quadratic_term(t) for t in quad_terms(q)
     ]
     moi_aff = MOI.ScalarAffineFunction(q.aff)
     return MOI.ScalarQuadraticFunction(qterms, moi_aff.terms, moi_aff.constant)
 end
-function moi_function(aff::GenericQuadExpr)
-    return MOI.ScalarQuadraticFunction(aff)
-end
-function moi_function_type(::Type{<:GenericQuadExpr{T}}) where {T}
-    return MOI.ScalarQuadraticFunction{T}
-end
 
-function QuadExpr(m::Model, f::MOI.ScalarQuadraticFunction)
-    quad = QuadExpr(
-        AffExpr(m, MOI.ScalarAffineFunction(f.affine_terms, f.constant)),
+function GenericQuadExpr{C,GenericVariableRef{T}}(
+    m::GenericModel{T},
+    f::MOI.ScalarQuadraticFunction,
+) where {C,T}
+    quad = GenericQuadExpr{C,GenericVariableRef{T}}(
+        GenericAffExpr{C,GenericVariableRef{T}}(
+            m,
+            MOI.ScalarAffineFunction(f.affine_terms, f.constant),
+        ),
     )
     for t in f.quadratic_terms
         v1 = t.variable_1
@@ -539,35 +739,14 @@ function QuadExpr(m::Model, f::MOI.ScalarQuadraticFunction)
         if v1 == v2
             coef /= 2
         end
-        add_to_expression!(quad, coef, VariableRef(m, v1), VariableRef(m, v2))
+        add_to_expression!(
+            quad,
+            coef,
+            GenericVariableRef{T}(m, v1),
+            GenericVariableRef{T}(m, v2),
+        )
     end
     return quad
-end
-function jump_function_type(
-    ::Model,
-    ::Type{MOI.ScalarQuadraticFunction{T}},
-) where {T}
-    return GenericQuadExpr{T,VariableRef}
-end
-function jump_function(
-    model::Model,
-    f::MOI.ScalarQuadraticFunction{T},
-) where {T}
-    return GenericQuadExpr{T,VariableRef}(model, f)
-end
-function jump_function_type(
-    ::Model,
-    ::Type{MOI.VectorQuadraticFunction{T}},
-) where {T}
-    return Vector{GenericQuadExpr{T,VariableRef}}
-end
-function jump_function(
-    model::Model,
-    f::MOI.VectorQuadraticFunction{T},
-) where {T}
-    return GenericQuadExpr{T,VariableRef}[
-        GenericQuadExpr{T,VariableRef}(model, f) for f in MOIU.eachscalar(f)
-    ]
 end
 
 """
@@ -593,13 +772,15 @@ function _fill_vqf!(
     return offset + length(quad_terms(aff))
 end
 
-function MOI.VectorQuadraticFunction(quads::Vector{QuadExpr})
+function MOI.VectorQuadraticFunction(
+    quads::Vector{GenericQuadExpr{C,GenericVariableRef{T}}},
+) where {C,T}
     num_quadratic_terms = sum(quad -> length(quad_terms(quad)), quads)
     quadratic_terms =
-        Vector{MOI.VectorQuadraticTerm{Float64}}(undef, num_quadratic_terms)
+        Vector{MOI.VectorQuadraticTerm{C}}(undef, num_quadratic_terms)
     num_lin_terms = sum(quad -> length(linear_terms(quad)), quads)
-    lin_terms = Vector{MOI.VectorAffineTerm{Float64}}(undef, num_lin_terms)
-    constants = Vector{Float64}(undef, length(quads))
+    lin_terms = Vector{MOI.VectorAffineTerm{C}}(undef, num_lin_terms)
+    constants = Vector{C}(undef, length(quads))
     quad_offset = 0
     lin_offset = 0
     for (i, quad) in enumerate(quads)
@@ -608,12 +789,6 @@ function MOI.VectorQuadraticFunction(quads::Vector{QuadExpr})
         constants[i] = constant(quad)
     end
     return MOI.VectorQuadraticFunction(quadratic_terms, lin_terms, constants)
-end
-
-moi_function(a::Vector{<:GenericQuadExpr}) = MOI.VectorQuadraticFunction(a)
-
-function moi_function_type(::Type{<:Vector{<:GenericQuadExpr{T}}}) where {T}
-    return MOI.VectorQuadraticFunction{T}
 end
 
 """

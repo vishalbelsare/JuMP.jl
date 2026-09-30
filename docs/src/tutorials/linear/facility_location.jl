@@ -5,11 +5,27 @@
 
 # # The facility location problem
 
-# It was originally contributed by Mathieu Tanneau (@mtanneau) and
-# Alexis Montoison (@amontoison).
+# **This tutorial was originally contributed by Mathieu Tanneau and Alexis Montoison.**
+
+# This tutorial formulates and solves both the uncapacitated and capacitated
+# facility location problems using binary integer programming in JuMP. It also
+# demonstrates how to visualise the problem data and solution using Plots.
+#
+# **Learning intentions:**
+# * Formulate a binary integer program for facility location, coupling
+#   open/close decisions with client-assignment decisions through linking
+#   constraints
+# * Extend the uncapacitated model with demand and capacity data to obtain the
+#   capacitated variant, and understand how the coupling constraints change
+# * Visualise problem data and the optimal solution to verify that the model
+#   behaves as expected
+
+# ## Required packages
+
+# This tutorial uses the following packages:
 
 using JuMP
-import GLPK
+import HiGHS
 import LinearAlgebra
 import Plots
 import Random
@@ -29,7 +45,7 @@ import Random
 #
 # **Objective**
 # The objective is to minimize the total cost of serving all clients.
-# This costs breaks down into two components:
+# This cost breaks down into two components:
 # * Fixed cost of building a facility.
 # In this example, this cost is $f_{j} = 1, \ \forall j$.
 # * Cost of serving clients from the assigned facility.
@@ -64,20 +80,22 @@ import Random
 
 # ### Problem data
 
+# To ensure reproducibility, we set the random number seed:
+
 Random.seed!(314)
 
-## number of clients
+# Here's the data we need:
+
+## Number of clients
 m = 12
-## number of facility locations
+## Number of facility locations
 n = 5
 
 ## Clients' locations
-Xc = rand(m)
-Yc = rand(m)
+x_c, y_c = rand(m), rand(m)
 
 ## Facilities' potential locations
-Xf = rand(n)
-Yf = rand(n)
+x_f, y_f = rand(n), rand(n)
 
 ## Fixed costs
 f = ones(n);
@@ -86,21 +104,21 @@ f = ones(n);
 c = zeros(m, n)
 for i in 1:m
     for j in 1:n
-        c[i, j] = LinearAlgebra.norm([Xc[i] - Xf[j], Yc[i] - Yf[j]], 2)
+        c[i, j] = LinearAlgebra.norm([x_c[i] - x_f[j], y_c[i] - y_f[j]], 2)
     end
 end
 
 # Display the data
 Plots.scatter(
-    Xc,
-    Yc,
+    x_c,
+    y_c;
     label = "Clients",
     markershape = :circle,
     markercolor = :blue,
 )
 Plots.scatter!(
-    Xf,
-    Yf,
+    x_f,
+    y_f;
     label = "Facility",
     markershape = :square,
     markercolor = :white,
@@ -112,64 +130,56 @@ Plots.scatter!(
 # ### JuMP implementation
 
 # Create a JuMP model
-ufl = Model(GLPK.Optimizer)
-#-
-# Variables
-@variable(ufl, y[1:n], Bin);
-@variable(ufl, x[1:m, 1:n], Bin);
-#-
-# Each client is served exactly once
-@constraint(ufl, client_service[i in 1:m], sum(x[i, j] for j in 1:n) == 1);
-#-
-# A facility must be open to serve a client
-@constraint(ufl, open_facility[i in 1:m, j in 1:n], x[i, j] <= y[j]);
-#-
-# Objective
-@objective(ufl, Min, f'y + sum(c .* x));
-#-
-# Solve the uncapacitated facility location problem with GLPK
-optimize!(ufl)
-println("Optimal value: ", objective_value(ufl))
+model = Model(HiGHS.Optimizer)
+set_silent(model)
+@variable(model, y[1:n], Bin);
+@variable(model, x[1:m, 1:n], Bin);
+## Each client is served exactly once
+@constraint(model, client_service[i in 1:m], sum(x[i, j] for j in 1:n) == 1);
+## A facility must be open to serve a client
+@constraint(model, open_facility[i in 1:m, j in 1:n], x[i, j] <= y[j]);
+@objective(model, Min, f' * y + sum(c .* x));
+
+# Solve the uncapacitated facility location problem with HiGHS
+
+optimize!(model)
+assert_is_solved_and_feasible(model)
+println("Optimal value: ", objective_value(model))
 
 # ### Visualizing the solution
 
-# The threshold 1e-5 ensure that edges between clients and facilities are drawn when x[i, j] ≈ 1.
-x_ = value.(x) .> 1 - 1e-5
-y_ = value.(y) .> 1 - 1e-5
+# The threshold 1e-5 ensures that edges between clients and facilities are drawn
+# when `x[i, j] ≈ 1`.
+x_is_selected = isapprox.(value.(x), 1; atol = 1e-5);
+y_is_selected = isapprox.(value.(y), 1; atol = 1e-5);
 
-# Display clients
 p = Plots.scatter(
-    Xc,
-    Yc,
+    x_c,
+    y_c;
     markershape = :circle,
     markercolor = :blue,
     label = nothing,
 )
 
-# Show open facility
-mc = [(y_[j] ? :red : :white) for j in 1:n]
 Plots.scatter!(
-    Xf,
-    Yf,
+    x_f,
+    y_f;
     markershape = :square,
-    markercolor = mc,
+    markercolor = [(y_is_selected[j] ? :red : :white) for j in 1:n],
     markersize = 6,
     markerstrokecolor = :red,
     markerstrokewidth = 2,
     label = nothing,
 )
 
-# Show client-facility assignment
-for i in 1:m
-    for j in 1:n
-        if x_[i, j] == 1
-            Plots.plot!(
-                [Xc[i], Xf[j]],
-                [Yc[i], Yf[j]],
-                color = :black,
-                label = nothing,
-            )
-        end
+for i in 1:m, j in 1:n
+    if x_is_selected[i, j]
+        Plots.plot!(
+            [x_c[i], x_f[j]],
+            [y_c[i], y_f[j]];
+            color = :black,
+            label = nothing,
+        )
     end
 end
 
@@ -179,7 +189,9 @@ p
 
 # ### Problem formulation
 #
-# The capacitated variant introduces a capacity constraint on each facility, i.e., clients have a certain level of demand to be served, while each facility only has finite capacity which cannot be exceeded.
+# The capacitated variant introduces a capacity constraint on each facility,
+# that is, clients have a certain level of demand to be served, while each facility
+# only has finite capacity which cannot be exceeded.
 #
 # Specifically,
 # * The demand of client $i$ is denoted by $a_{i} \geq 0$
@@ -192,7 +204,8 @@ p
 # \end{aligned}
 # ```
 #
-# Note that, if $y_{j}$ is set to $0$, the capacity constraint above automatically forces $x_{i, j}$ to $0$.
+# Note that, if $y_{j}$ is set to $0$, the capacity constraint above
+# automatically forces $x_{i, j}$ to $0$ for every client with $a_{i} > 0$.
 
 # Thus, the capacitated facility location can be formulated as follows
 #
@@ -208,19 +221,21 @@ p
 # \end{aligned}
 # ```
 #
-# For simplicity, we will assume that there is enough capacity to serve the demand,
-#  i.e., there exists at least one feasible solution.
+# For simplicity, we will assume that there is enough capacity to serve the
+# demand, that is, there exists at least one feasible solution.
 
-# Demands
+# We need some new data:
+
+## Demands
 a = rand(1:3, m);
 
-# Capacities
+## Capacities
 q = rand(5:10, n);
 
 # Display the data
 Plots.scatter(
-    Xc,
-    Yc,
+    x_c,
+    y_c;
     label = nothing,
     markershape = :circle,
     markercolor = :blue,
@@ -228,8 +243,8 @@ Plots.scatter(
 )
 
 Plots.scatter!(
-    Xf,
-    Yf,
+    x_f,
+    y_f;
     label = nothing,
     markershape = :rect,
     markercolor = :white,
@@ -241,65 +256,60 @@ Plots.scatter!(
 # ### JuMP implementation
 
 # Create a JuMP model
-cfl = Model(GLPK.Optimizer)
-#-
-# Variables
-@variable(cfl, y[1:n], Bin);
-@variable(cfl, x[1:m, 1:n], Bin);
-#-
-# Each client is served exactly once
-@constraint(cfl, client_service[i in 1:m], sum(x[i, :]) == 1);
-#-
-# Capacity constraint
-@constraint(cfl, capacity, x'a .<= (q .* y));
-#-
-# Objective
-@objective(cfl, Min, f'y + sum(c .* x));
-#-
+model = Model(HiGHS.Optimizer)
+set_silent(model)
+@variable(model, y[1:n], Bin);
+@variable(model, x[1:m, 1:n], Bin);
+## Each client is served exactly once
+@constraint(model, client_service[i in 1:m], sum(x[i, :]) == 1);
+## Capacity constraint
+@constraint(model, capacity, x' * a .<= (q .* y));
+## Objective
+@objective(model, Min, f' * y + sum(c .* x));
+
 # Solve the problem
-optimize!(cfl)
-println("Optimal value: ", objective_value(cfl))
+
+optimize!(model)
+assert_is_solved_and_feasible(model)
+println("Optimal value: ", objective_value(model))
 
 # ### Visualizing the solution
 
-# The threshold 1e-5 ensure that edges between clients and facilities are drawn when x[i, j] ≈ 1.
-x_ = value.(x) .> 1 - 1e-5;
-y_ = value.(y) .> 1 - 1e-5;
+# The threshold 1e-5 ensures that edges between clients and facilities are drawn
+# when `x[i, j] ≈ 1`.
+x_is_selected = isapprox.(value.(x), 1; atol = 1e-5);
+y_is_selected = isapprox.(value.(y), 1; atol = 1e-5);
 
 # Display the solution
 p = Plots.scatter(
-    Xc,
-    Yc,
+    x_c,
+    y_c;
     label = nothing,
     markershape = :circle,
     markercolor = :blue,
     markersize = 2 .* (2 .+ a),
 )
 
-mc = [(y_[j] ? :red : :white) for j in 1:n]
 Plots.scatter!(
-    Xf,
-    Yf,
+    x_f,
+    y_f;
     label = nothing,
     markershape = :rect,
-    markercolor = mc,
+    markercolor = [(y_is_selected[j] ? :red : :white) for j in 1:n],
     markersize = q,
     markerstrokecolor = :red,
     markerstrokewidth = 2,
 )
 
-# Show client-facility assignment
-for i in 1:m
-    for j in 1:n
-        if x_[i, j] == 1
-            Plots.plot!(
-                [Xc[i], Xf[j]],
-                [Yc[i], Yf[j]],
-                color = :black,
-                label = nothing,
-            )
-            break
-        end
+for i in 1:m, j in 1:n
+    if x_is_selected[i, j]
+        Plots.plot!(
+            [x_c[i], x_f[j]],
+            [y_c[i], y_f[j]];
+            color = :black,
+            label = nothing,
+        )
     end
 end
+
 p

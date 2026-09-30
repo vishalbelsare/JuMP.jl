@@ -20,11 +20,17 @@
 
 # # Getting started with data and plotting
 
-# In this tutorial we will learn how to read tabular data into Julia, and some
-# of the basics of plotting.
-
-# If you're new to Julia, start by reading [Getting started with Julia](@ref)
-# and [Getting started with JuMP](@ref) first.
+# This tutorial introduces reading tabular data into Julia using DataFrames.jl
+# and covers the basics of plotting results. If you're new to Julia, start by
+# reading [Getting started with Julia](@ref) and [Getting started with JuMP](@ref)
+# first.
+#
+# **Learning intentions:**
+# * Read tabular data from CSV and other delimited formats into Julia using
+#   DataFrames.jl and handle missing values during parsing
+# * Group, filter, and aggregate a DataFrame to prepare data for use in a
+#   JuMP model
+# * Visualize data and optimization results using Plots.jl
 
 # !!! note
 #     There are multiple ways to read the same kind of data into Julia. This
@@ -34,7 +40,11 @@
 # Before we get started, we need this constant to point to where the data files
 # are.
 
-const DATA_DIR = joinpath(@__DIR__, "data")
+import JuMP
+const DATA_DIR = joinpath(
+    dirname(pathof(JuMP)),
+    joinpath("..", "docs", "src", "tutorials", "getting_started", "data"),
+);
 
 # ## Where to get help
 
@@ -58,7 +68,7 @@ const DATA_DIR = joinpath(@__DIR__, "data")
 
 import DataFrames
 
-# !!! info What is a DataFrame?
+# !!! info "What is a DataFrame?"
 #     A DataFrame is a data structure like a table or spreadsheet. You can use
 #     it for storing and exploring a set of related data values. Think of it as
 #     a smarter array for holding tabular data.
@@ -74,7 +84,7 @@ import DataFrames
 
 import Plots
 
-# ### CSV .jl
+# ### CSV.jl
 
 # CSV and other delimited text files can be read by the CSV.jl package.
 
@@ -94,7 +104,7 @@ csv_df = CSV.read(joinpath(DATA_DIR, "StarWars.csv"), DataFrames.DataFrame)
 
 Plots.scatter(
     csv_df.Weight,
-    csv_df.Height,
+    csv_df.Height;
     xlabel = "Weight",
     ylabel = "Height",
 )
@@ -105,7 +115,7 @@ Plots.scatter(
 
 csv_df = CSV.read(
     joinpath(DATA_DIR, "StarWars.csv"),
-    DataFrames.DataFrame,
+    DataFrames.DataFrame;
     missingstring = "NA",
 )
 
@@ -113,7 +123,7 @@ csv_df = CSV.read(
 
 Plots.scatter(
     csv_df.Weight,
-    csv_df.Height,
+    csv_df.Height;
     title = "Height vs Weight of StarWars characters",
     xlabel = "Weight",
     ylabel = "Height",
@@ -121,7 +131,7 @@ Plots.scatter(
     ylims = (0, 3),
 )
 
-# Better!
+# That looks better.
 
 # !!! tip
 #     Read the [CSV documentation](https://csv.juliadata.org/stable/) for other
@@ -149,11 +159,11 @@ DataFrames.dropmissing!(eyecolor_count, :Eyecolor)
 
 # Then we can visualize the data:
 
-sort!(eyecolor_count, :count, rev = true)
+sort!(eyecolor_count, :count; rev = true)
 Plots.bar(
     eyecolor_count.Eyecolor,
-    eyecolor_count.count,
-    xlabel = "Eyecolor",
+    eyecolor_count.count;
+    xlabel = "Eye color",
     ylabel = "Number of characters",
     label = false,
 )
@@ -173,11 +183,11 @@ Plots.bar(
 
 ss_df = CSV.read(joinpath(DATA_DIR, "Cereal.txt"), DataFrames.DataFrame)
 
-# We can also specify the delimiter by passing the `delim` argument.
+# We can also specify the delimiter as follows:
 
 delim_df = CSV.read(
     joinpath(DATA_DIR, "Soccer.txt"),
-    DataFrames.DataFrame,
+    DataFrames.DataFrame;
     delim = "::",
 )
 
@@ -242,7 +252,7 @@ csv_df[1, :] # This produces a DataFrameRow.
 
 # We can change the values just as we normally assign values.
 
-# Assign a range to scalar:
+# Assign a scalar to a range:
 
 csv_df[1:3, :Height] .= 1.83
 
@@ -276,7 +286,7 @@ csv_df
 passport_data = CSV.read(
     joinpath(DATA_DIR, "passport-index-matrix.csv"),
     DataFrames.DataFrame,
-)
+);
 
 # In this dataset, the first column represents a passport (=from) and each
 # remaining column represents a foreign country (=to).
@@ -306,8 +316,6 @@ for country in passport_data.Passport
     passport_data[!, country] = modifier.(passport_data[!, country])
 end
 
-passport_data
-
 # The values in the cells now represent:
 # * 1 = no visa required for travel
 # * 0 = visa required for travel
@@ -322,7 +330,7 @@ passport_data
 # Since we wish to visit all the countries, for every country, we must own at
 # least one passport that lets us travel to that country visa free. For one
 # destination, this can be mathematically represented as
-# $\sum_{c \in C} a_{c,d} \cdot x_{d} \geq 1$, where $a$ is the `passport_data`
+# $\sum_{c \in C} a_{c,d} \cdot x_{c} \geq 1$, where $a$ is the `passport_data`
 # dataframe.
 
 # Thus, we can represent this problem using the following model:
@@ -338,7 +346,7 @@ passport_data
 # We'll now solve the problem using JuMP:
 
 using JuMP
-import GLPK
+import HiGHS
 
 # First, create the set of countries:
 
@@ -346,13 +354,14 @@ C = passport_data.Passport
 
 # Then, create the model and initialize the decision variables:
 
-model = Model(GLPK.Optimizer)
+model = Model(HiGHS.Optimizer)
+set_silent(model)
 @variable(model, x[C], Bin)
 @objective(model, Min, sum(x))
 @constraint(model, [d in C], passport_data[!, d]' * x >= 1)
 model
 
-# Now optimize!
+# Now optimize:
 
 optimize!(model)
 
@@ -360,6 +369,10 @@ optimize!(model)
 # solution:
 
 solution_summary(model)
+
+# Just to be sure, check that the solver found an optimal solution:
+
+assert_is_solved_and_feasible(model)
 
 # ### Solution
 
@@ -376,9 +389,9 @@ for c in C
     end
 end
 
-# Interesting! We need some passports, like Australia and the United States,
-# which have widespread access to a large number of countries. However, we also
-# need passports like North Korea which only have visa-free access to a very
+# We need some passports, like New Zealand and the United States, which have
+# widespread access to a large number of countries. However, we also need
+# passports like North Korea which only have visa-free access to a very
 # limited number of countries.
 
 # !!! note

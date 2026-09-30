@@ -20,19 +20,34 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE  #src
 # SOFTWARE.                                                                      #src
 
-# # Logistic regression
+# # Example: logistic regression
 
-# **Originally Contributed by**: François Pacaud
+# **This tutorial was originally contributed by François Pacaud.**
 
-# This tutorial shows how to solve a logistic regression problem
-# with JuMP. Logistic regression is a well known method in machine learning,
-# useful when we want to classify binary variables with the help of
-# a given set of features. To this goal,
-# we find the optimal combination of features maximizing
-# the (log)-likelihood onto a training set. From a modern optimization glance,
-# the resulting problem is convex and differentiable. On a modern optimization
-# glance, it is even conic representable.
+# This tutorial shows how to solve a logistic regression problem in JuMP by
+# reformulating the log-likelihood maximisation as a conic program using the
+# exponential cone, rather than relying on a general nonlinear solver.
 #
+# **Learning intentions:**
+# * Reformulate the logistic log-likelihood as a conic program using
+#   [`MOI.ExponentialCone`](@ref), so a conic solver can be used instead of
+#   a general nonlinear solver
+# * Add ℓ2 or ℓ1 regularization by switching the norm cone, reusing the same
+#   exponential-cone building block for the loss terms in both cases
+# * Observe that ℓ1 regularization produces a sparse coefficient vector while
+#   ℓ2 regularization does not
+
+# ## Required packages
+
+# This tutorial uses the following packages:
+
+using JuMP
+import Clarabel
+import MathOptInterface as MOI
+import Random
+
+Random.seed!(2713);
+
 # ## Formulating the logistic regression problem
 #
 # Suppose we have a set of training data-point $i = 1, \cdots, n$, where
@@ -122,23 +137,6 @@
 # Thus, if $n \gg 1$, we get a large number of variables and constraints.
 
 # ## Fitting logistic regression with a conic solver
-#
-# It is now time to pass to the implementation. We choose SCS as a conic solver.
-using JuMP
-import Random
-import SCS
-
-# !!! info
-#     This tutorial uses sets from [MathOptInterface](@ref moi_documentation).
-#     By default, JuMP exports the `MOI` symbol as an alias for the
-#     MathOptInterface.jl package. We recommend making this more explicit in
-#     your code by adding the following lines:
-#     ```julia
-#     import MathOptInterface
-#     const MOI = MathOptInterface
-#     ```
-
-Random.seed!(2713);
 
 # We start by implementing a function to generate a fake dataset, and where
 # we could tune the correlation between the feature variables. The function
@@ -186,21 +184,22 @@ end
 # We generate the dataset.
 #
 # !!! warning
-#     Be careful here, for large n and p SCS could fail to converge!
+#     Be careful here, for large n and p Clarabel could fail to converge.
 #
 n, p = 200, 10
-X, y = generate_dataset(n, p, shift = 10.0);
+X, y = generate_dataset(n, p; shift = 10.0);
 
 ## We could now solve the logistic regression problem
 λ = 10.0
 model = build_logit_model(X, y, λ)
-set_optimizer(model, SCS.Optimizer)
+set_optimizer(model, Clarabel.Optimizer)
 set_silent(model)
-JuMP.optimize!(model)
+optimize!(model)
+assert_is_solved_and_feasible(model; allow_almost = true)
 
 #-
 
-θ♯ = JuMP.value.(model[:θ])
+θ♯ = value.(model[:θ])
 
 # It appears that the speed of convergence is not that impacted by the correlation
 # of the dataset, nor by the penalty $\lambda$.
@@ -210,7 +209,7 @@ JuMP.optimize!(model)
 # We now formulate the logistic problem with a $\ell_1$ regularization term.
 # The $\ell_1$ regularization ensures sparsity in the optimal
 # solution of the resulting optimization problem. Luckily, the $\ell_1$ norm
-# is implemented as a set in `MathOptInterface`. Thus, we could easily formulate
+# is implemented as a set in `MathOptInterface`. Thus, we could formulate
 # the sparse logistic regression problem with the help of a `MOI.NormOneCone`
 # set.
 function build_sparse_logit_model(X, y, λ)
@@ -236,18 +235,19 @@ count_nonzero(v::Vector; tol = 1e-6) = sum(abs.(v) .>= tol)
 ## We solve the sparse logistic regression problem on the same dataset as before.
 λ = 10.0
 sparse_model = build_sparse_logit_model(X, y, λ)
-set_optimizer(sparse_model, SCS.Optimizer)
+set_optimizer(sparse_model, Clarabel.Optimizer)
 set_silent(sparse_model)
-JuMP.optimize!(sparse_model)
+optimize!(sparse_model)
+assert_is_solved_and_feasible(sparse_model; allow_almost = true)
 
 #-
 
-θ♯ = JuMP.value.(sparse_model[:θ])
+θ♯ = value.(sparse_model[:θ])
 println(
     "Number of non-zero components: ",
     count_nonzero(θ♯),
     " (out of ",
-    p,
+    length(θ♯),
     " features)",
 )
 

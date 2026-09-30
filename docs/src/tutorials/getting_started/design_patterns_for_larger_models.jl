@@ -20,12 +20,19 @@
 
 # # Design patterns for larger models
 
-# JuMP makes it easy to build and solve optimization models. However, once you
-# start to construct larger models, and especially ones that interact with
-# external data sources or have customizable sets of variables and constraints
-# based on client choices, you may find that your scripts become unwieldy. This
-# tutorial demonstrates a variety of ways in which you can structure larger JuMP
-# models to improve their readability and maintainability.
+# JuMP makes it easy to build and solve optimization models, but larger models
+# that interact with external data or have customizable structure can quickly
+# become unwieldy. This tutorial demonstrates a progression of design patterns
+# —from simple scripts to reusable functions and data-driven formulations—
+# for structuring larger JuMP models.
+#
+# **Learning intentions:**
+# * Refactor a hard-coded JuMP script into a reusable function that accepts
+#   external data, improving correctness and reducing global state
+# * Separate data from model construction by reading input from JSON files
+#   and validating it with Julia structs
+# * Use abstract types and multiple dispatch to build modular optimization
+#   workflows that are easy to extend without modifying existing code
 
 # !!! tip
 #     This tutorial is more advanced than the other "Getting started" tutorials.
@@ -45,16 +52,18 @@
 # Your first prototype of a JuMP model is probably a script that uses a small
 # set of hard-coded data.
 
-using JuMP, GLPK
+using JuMP
+import HiGHS
 profit = [5, 3, 2, 7, 4]
 weight = [2, 8, 4, 2, 5]
 capacity = 10
 N = 5
-model = Model(GLPK.Optimizer)
+model = Model(HiGHS.Optimizer)
 @variable(model, x[1:N], Bin)
 @objective(model, Max, sum(profit[i] * x[i] for i in 1:N))
 @constraint(model, sum(weight[i] * x[i] for i in 1:N) <= capacity)
 optimize!(model)
+assert_is_solved_and_feasible(model)
 value.(x)
 
 # The benefits of this approach are:
@@ -63,12 +72,12 @@ value.(x)
 
 # The downsides include:
 #  * all variables are global (read [Performance tips](https://docs.julialang.org/en/v1/manual/performance-tips/))
-#  * it is easy to introduce errors, e.g., having `profit` and `weight` be
+#  * it is easy to introduce errors, for example, having `profit` and `weight` be
 #    vectors of different lengths, or not match `N`
 #  * the solution, `x[i]`, is hard to interpret without knowing the order in
 #    which we provided the data.
 
-# ## Wrap the model in a fuction
+# ## Wrap the model in a function
 
 # A good next step is to wrap your model in a function. This is useful for a few
 # reasons:
@@ -82,11 +91,12 @@ function solve_knapsack_1(profit::Vector, weight::Vector, capacity::Real)
         throw(DimensionMismatch("profit and weight are different sizes"))
     end
     N = length(weight)
-    model = Model(GLPK.Optimizer)
+    model = Model(HiGHS.Optimizer)
     @variable(model, x[1:N], Bin)
     @objective(model, Max, sum(profit[i] * x[i] for i in 1:N))
     @constraint(model, sum(weight[i] * x[i] for i in 1:N) <= capacity)
     optimize!(model)
+    assert_is_solved_and_feasible(model)
     return value.(x)
 end
 
@@ -151,7 +161,7 @@ data
 # as input:
 
 function solve_knapsack_2(data::KnapsackData)
-    model = Model(GLPK.Optimizer)
+    model = Model(HiGHS.Optimizer)
     @variable(model, x[keys(data.objects)], Bin)
     @objective(model, Max, sum(v.profit * x[k] for (k, v) in data.objects))
     @constraint(
@@ -159,6 +169,7 @@ function solve_knapsack_2(data::KnapsackData)
         sum(v.weight * x[k] for (k, v) in data.objects) <= data.capacity,
     )
     optimize!(model)
+    assert_is_solved_and_feasible(model)
     return value.(x)
 end
 
@@ -170,18 +181,23 @@ solve_knapsack_2(data)
 # to hard-code the data into Julia. A good next step is to separate the data
 # into an external file format; JSON is a common choice.
 
-# The JuMP repository [has a file](https://github.com/jump-dev/JuMP.jl/blob/master/docs/src/tutorials/getting_started/data/knapsack.json)
-# we're going to use for this tutorial. To run this tutorial locally, download
-# the file and then update `data_filename` as appropriate.
-
-# To build this version of the JuMP documentation, we needed to set the
-# filename:
-
-data_filename = joinpath(@__DIR__, "data", "knapsack.json");
-
-# `knapsack.json` has the following contents:
-
-println(read(data_filename, String))
+json_data = """
+{
+    "objects": {
+        "apple": {"profit": 5.0, "weight": 2.0},
+        "banana": {"profit": 3.0, "weight": 8.0},
+        "cherry": {"profit": 2.0, "weight": 4.0},
+        "date": {"profit": 7.0, "weight": 2.0},
+        "eggplant": {"profit": 4.0, "weight": 5.0}
+    },
+    "capacity": 10.0
+}
+"""
+temp_dir = mktempdir()
+knapsack_json_filename = joinpath(temp_dir, "knapsack.json")
+## Instead of writing a new file here you could replace `knapsack_json_filename`
+## with the path to a local file.
+write(knapsack_json_filename, json_data);
 
 # Now let's write a function that reads this file and builds a `KnapsackData`
 # object:
@@ -199,13 +215,13 @@ function read_data(filename)
     )
 end
 
-data = read_data(data_filename)
+data = read_data(knapsack_json_filename)
 
 # ## Add options via if-else
 
 # At this point, we have data in a file format which we can load and solve a
 # single problem. For many users, this might be sufficient. However, at some
-# point you may be asked to add features like "but what if I want to take more
+# point you may be asked to add features like "but what if we want to take more
 # than one of a particular item?"
 
 # If this is the first time that you've been asked to add a feature, adding
@@ -213,7 +229,7 @@ data = read_data(data_filename)
 # write:
 
 function solve_knapsack_3(data::KnapsackData; binary_knapsack::Bool)
-    model = Model(GLPK.Optimizer)
+    model = Model(HiGHS.Optimizer)
     if binary_knapsack
         @variable(model, x[keys(data.objects)], Bin)
     else
@@ -225,6 +241,7 @@ function solve_knapsack_3(data::KnapsackData; binary_knapsack::Bool)
         sum(v.weight * x[k] for (k, v) in data.objects) <= data.capacity,
     )
     optimize!(model)
+    assert_is_solved_and_feasible(model)
     return value.(x)
 end
 
@@ -236,7 +253,7 @@ solve_knapsack_3(data; binary_knapsack = true)
 
 solve_knapsack_3(data; binary_knapsack = false)
 
-# ## Add configuation options via dispatch
+# ## Add configuration options via dispatch
 
 # If you get repeated requests to add different options, you'll quickly find
 # yourself in a mess of different flags and `if-else` statements. It's hard to
@@ -259,7 +276,7 @@ struct IntegerKnapsackConfig <: AbstractConfiguration end
 # of our variables.
 
 function solve_knapsack_4(data::KnapsackData, config::AbstractConfiguration)
-    model = Model(GLPK.Optimizer)
+    model = Model(HiGHS.Optimizer)
     x = add_knapsack_variables(model, data, config)
     @objective(model, Max, sum(v.profit * x[k] for (k, v) in data.objects))
     @constraint(
@@ -267,6 +284,7 @@ function solve_knapsack_4(data::KnapsackData, config::AbstractConfiguration)
         sum(v.weight * x[k] for (k, v) in data.objects) <= data.capacity,
     )
     optimize!(model)
+    assert_is_solved_and_feasible(model)
     return value.(x)
 end
 
@@ -349,15 +367,58 @@ function add_knapsack_objective(
 end
 
 function solve_knapsack_5(data::KnapsackData, config::AbstractConfiguration)
-    model = Model(GLPK.Optimizer)
+    model = Model(HiGHS.Optimizer)
     add_knapsack_variables(model, data, config)
     add_knapsack_constraints(model, data, config)
     add_knapsack_objective(model, data, config)
     optimize!(model)
+    assert_is_solved_and_feasible(model)
     return value.(model[:x])
 end
 
 solve_knapsack_5(data, BinaryKnapsackConfig())
+
+# ## Function barriers
+
+# Querying a variable like `x = model[:x]` is not type stable. The lack of type
+# stability means that Julia cannot statically prove what the type of `x` will
+# be within a function. As a consequence, the functions
+# `add_knapsack_constraints` and `add_knapsack_objective` are slower than they
+# would be if Julia could prove that `x` was a [`Containers.DenseAxisArray`](@ref).
+
+# One solution to the problem of type stability is to use a function barrier:
+
+function add_knapsack_constraints(
+    model::Model,
+    data::KnapsackData,
+    config::AbstractConfiguration,
+)
+    return add_knapsack_constraints_inner(model, data, config, model[:x])
+end
+
+function add_knapsack_constraints_inner(
+    model::Model,
+    data::KnapsackData,
+    ::AbstractConfiguration,
+    x,
+)
+    @constraint(
+        model,
+        capacity_constraint,
+        sum(v.weight * x[k] for (k, v) in data.objects) <= data.capacity,
+    )
+    return
+end
+
+# Now, `add_knapsack_constraints_inner` is faster because Julia can compile a
+# specific version that depends on the type of `x` passed as an input argument.
+
+# The downside of function barriers is that they require more code. The upside is
+# faster code and reduced memory allocations. In general, you should add a
+# function barrier if you have a benchmark showing that the difference is
+# meaningful for your code base. Function barriers are more likely to be useful
+# if the `_inner` function does a lot of computational work, for example, it
+# adds thousands of constraints or has a summation over thousands of items.
 
 # ## Remove solver dependence, add error checks
 
@@ -365,8 +426,9 @@ solve_knapsack_5(data, BinaryKnapsackConfig())
 # different. We've wrapped it in a function, defined some data types, and
 # introduced configuration options to control the variables and constraints that
 # get added. There are a few other steps we can do to further improve things:
-#  * remove the dependence on `GLPK`
-#  * add checks that we found an optimal solution
+#  * remove the dependence on `HiGHS`
+#  * return `nothing` with a warning, instead of throwing an error, if we do not
+#    find an optimal solution
 #  * add a helper function to avoid the need to explicitly construct the data.
 
 function solve_knapsack_6(
@@ -379,7 +441,7 @@ function solve_knapsack_6(
     add_knapsack_constraints(model, data, config)
     add_knapsack_objective(model, data, config)
     optimize!(model)
-    if termination_status(model) != OPTIMAL
+    if !is_solved_and_feasible(model)
         @warn("Model not solved to optimality")
         return nothing
     end
@@ -394,8 +456,11 @@ function solve_knapsack_6(
     return solve_knapsack_6(optimizer, read_data(data), config)
 end
 
-solution =
-    solve_knapsack_6(GLPK.Optimizer, data_filename, BinaryKnapsackConfig())
+solution = solve_knapsack_6(
+    HiGHS.Optimizer,
+    knapsack_json_filename,
+    BinaryKnapsackConfig(),
+)
 
 # ## Create a module
 
@@ -480,9 +545,17 @@ end
 function _add_knapsack_constraints(
     model::JuMP.Model,
     data::_KnapsackData,
-    ::_AbstractConfiguration,
+    config::_AbstractConfiguration,
 )
-    x = model[:x]
+    return _add_knapsack_constraints_inner(model, data, config, model[:x])
+end
+
+function _add_knapsack_constraints_inner(
+    model::JuMP.Model,
+    data::_KnapsackData,
+    ::_AbstractConfiguration,
+    x,
+)
     JuMP.@constraint(
         model,
         capacity_constraint,
@@ -494,9 +567,17 @@ end
 function _add_knapsack_objective(
     model::JuMP.Model,
     data::_KnapsackData,
-    ::_AbstractConfiguration,
+    config::_AbstractConfiguration,
 )
-    x = model[:x]
+    return _add_knapsack_objective_inner(model, data, config, model[:x])
+end
+
+function _add_knapsack_objective_inner(
+    model::JuMP.Model,
+    data::_KnapsackData,
+    ::_AbstractConfiguration,
+    x,
+)
     JuMP.@objective(model, Max, sum(v.profit * x[k] for (k, v) in data.objects))
     return
 end
@@ -511,7 +592,7 @@ function _solve_knapsack(
     _add_knapsack_constraints(model, data, config)
     _add_knapsack_objective(model, data, config)
     JuMP.optimize!(model)
-    if JuMP.termination_status(model) != JuMP.OPTIMAL
+    if !JuMP.is_solved_and_feasible(model)
         @warn("Model not solved to optimality")
         return nothing
     end
@@ -521,7 +602,7 @@ end
 """
     solve_knapsack(
         optimizer,
-        data_filename::String,
+        knapsack_json_filename::String,
         config::_AbstractConfiguration,
     )
 
@@ -531,7 +612,7 @@ Solve the knapsack problem and return the optimal primal solution
 
  * `optimizer` : an object that can be passed to `JuMP.Model` to construct a new
    JuMP model.
- * `data_filename` : the filename of a JSON file containing the data for the
+ * `knapsack_json_filename` : the filename of a JSON file containing the data for the
    problem.
  * `config` : an object to control the type of knapsack model constructed.
    Valid options are:
@@ -540,16 +621,17 @@ Solve the knapsack problem and return the optimal primal solution
 
 ## Returns
 
- * If an optimal solution exists: a `JuMP.DenseAxisArray` that maps the `String`
-   name of each object to the number of objects to pack into the knapsack.
+ * If an optimal solution exists: a `JuMP.Containers.DenseAxisArray` that maps
+   the `String` name of each object to the number of objects to pack into the
+   knapsack.
  * Otherwise, `nothing`, indicating that the problem does not have an optimal
    solution.
 
-## Examples
+## Example
 
 ```julia
 solution = solve_knapsack(
-    GLPK.Optimizer,
+    HiGHS.Optimizer,
     "path/to/data.json",
     BinaryKnapsackConfig(),
 )
@@ -557,7 +639,7 @@ solution = solve_knapsack(
 
 ```julia
 solution = solve_knapsack(
-    MOI.OptimizerWithAttributes(GLPK.Optimizer, "msg_lev" => 0),
+    MOI.OptimizerWithAttributes(HiGHS.Optimizer, "output_flag" => false),
     "path/to/data.json",
     IntegerKnapsackConfig(),
 )
@@ -565,10 +647,11 @@ solution = solve_knapsack(
 """
 function solve_knapsack(
     optimizer,
-    data_filename::String,
+    knapsack_json_filename::String,
     config::_AbstractConfiguration,
 )
-    return _solve_knapsack(optimizer, _read_data(data_filename), config)
+    data = _read_data(knapsack_json_filename)
+    return _solve_knapsack(optimizer, data, config)
 end
 
 end
@@ -578,8 +661,8 @@ end
 import .KnapsackModel
 
 KnapsackModel.solve_knapsack(
-    GLPK.Optimizer,
-    joinpath(@__DIR__, "data", "knapsack.json"),
+    HiGHS.Optimizer,
+    knapsack_json_filename,
     KnapsackModel.BinaryKnapsackConfig(),
 )
 
@@ -604,8 +687,8 @@ using Test
 @testset "KnapsackModel" begin
     @testset "feasible_binary_knapsack" begin
         x = KnapsackModel.solve_knapsack(
-            GLPK.Optimizer,
-            joinpath(@__DIR__, "data", "knapsack.json"),
+            HiGHS.Optimizer,
+            knapsack_json_filename,
             KnapsackModel.BinaryKnapsackConfig(),
         )
         @test isapprox(x["apple"], 1, atol = 1e-5)
@@ -616,8 +699,8 @@ using Test
     end
     @testset "feasible_integer_knapsack" begin
         x = KnapsackModel.solve_knapsack(
-            GLPK.Optimizer,
-            joinpath(@__DIR__, "data", "knapsack.json"),
+            HiGHS.Optimizer,
+            knapsack_json_filename,
             KnapsackModel.IntegerKnapsackConfig(),
         )
         @test isapprox(x["apple"], 0, atol = 1e-5)
@@ -627,10 +710,24 @@ using Test
         @test isapprox(x["eggplant"], 0, atol = 1e-5)
     end
     @testset "infeasible_binary_knapsack" begin
+        dir = mktempdir()
+        infeasible_filename = joinpath(dir, "infeasible.json")
+        write(
+            infeasible_filename,
+            """{
+                "objects": {
+                    "apple": {"profit": 5.0, "weight": 2.0},
+                    "banana": {"profit": 3.0, "weight": 8.0},
+                    "cherry": {"profit": 2.0, "weight": 4.0},
+                    "date": {"profit": 7.0, "weight": 2.0},
+                    "eggplant": {"profit": 4.0, "weight": 5.0}
+                },
+                "capacity": -10.0
+            }""",
+        )
         x = KnapsackModel.solve_knapsack(
-            GLPK.Optimizer,
-            ## This file contains data that makes the problem infeasible.
-            joinpath(@__DIR__, "data", "knapsack_infeasible.json"),
+            HiGHS.Optimizer,
+            infeasible_filename,
             KnapsackModel.BinaryKnapsackConfig(),
         )
         @test x === nothing
@@ -648,7 +745,7 @@ end
 # JuMP models, so consider this tutorial a starting point, rather than a
 # comprehensive list of all the possible ways to structure JuMP models.  If you
 # are embarking on a large project that uses JuMP, a good next step is to
-# look at ways people have written large JuMP projects "in the wild".
+# look at ways people have written large JuMP projects "in the wild."
 
 # Here are some good examples (all co-incidentally related to energy):
 # * AnyMOD.jl

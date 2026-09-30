@@ -5,35 +5,44 @@
 
 # # The cannery problem
 
-# _Original author: Louis Luangkesorn, January 30, 2015._
+# **This tutorial was originally contributed by Louis Luangkesorn.**
 
-# This tutorial solves the cannery problem from Dantzig,
-# _Linear Programming and Extensions_, Princeton University Press, Princeton,
-# NJ, 1963. This class of problem is known as a transshipment problem.
-
-# The purpose of this tutorial is to demonstrate how to use JSON data in the
-# formulation of a JuMP model.
+# This tutorial solves the cannery problem—a classic transportation problem
+# from Dantzig's _Linear Programming and Extensions_—using JSON data to supply
+# the model parameters. It demonstrates how to build a JuMP model from
+# structured external data.
+#
+# **Learning intentions:**
+# * Formulate a classic transportation problem as a linear program with per-plant
+#   supply limits, per-market demand requirements, and a cost-minimising objective
+# * Load problem data from a JSON source and derive the index sets and parameters
+#   that drive the JuMP model, rather than hard-coding them
 
 # ## Required packages
 
+# This tutorial uses the following packages:
+
 using JuMP
-import GLPK
+import HiGHS
 import JSON
-import Test  #src
+import Test
 
 # ## Formulation
 
-# The cannery problem assumes we are optimizing the shipment of cans from
-# production plants ``p \in P`` to markets ``m \in M``.
+# The cannery problem assumes we are optimizing the shipment of cases of
+# cans from production plants ``p \in P`` to markets ``m \in M``.
 
-# Each production plant ``p`` has a capacity, ``c_p``, and each market ``m``
-# has a demand ``d_m``. The distance from plant to market is ``d_{p,m}``.
+# Each production plant ``p`` has a capacity ``c_p``, and each market ``m``
+# has a demand ``d_m``. The shipping cost per case of cans from plant ``p``
+# to market ``m`` is ``t_{p,m}``.
 
-# With a little effort, we can formulate our problem as the following linear
-# program:
+# We wish to find the distribution plan ``x_{p,m}``, the number of cases of cans
+# to ship from plant ``p`` to market ``m``, for ``p \in P`` and ``m \in M``
+# that minimizes the shipping costs. We can formulate our problem as the
+# following linear program:
 # ```math
 # \begin{aligned}
-# \min & \sum\limits_{p \in P}\sum\limits_{m \in M} d_{p,m} x_{p,m} \\
+# \min & \sum\limits_{p \in P}\sum\limits_{m \in M} t_{p,m} x_{p,m} \\
 # \text{s.t.} & \sum\limits_{m \in M} x_{p,m} \le c_p, && \forall p \in P \\
 #             & \sum\limits_{p \in P} x_{p,m} \ge d_m, && \forall m \in M \\
 #             & x_{p,m} \ge 0, && \forall p \in P, m \in M
@@ -87,9 +96,9 @@ distance(p::String, m::String) = data["distances"]["$(p) => $(m)"]
 # Now we're ready to convert our mathematical formulation into a JuMP model.
 
 # First, create a new JuMP model. Since we have a linear program, we'll use
-# GLPK as our optimizer:
+# HiGHS as our optimizer:
 
-model = Model(GLPK.Optimizer)
+model = Model(HiGHS.Optimizer)
 
 # Our decision variables are indexed over the set of plants and markets:
 
@@ -103,23 +112,21 @@ model = Model(GLPK.Optimizer)
 
 @constraint(model, [m in M], sum(x[:, m]) >= data["markets"][m]["demand"])
 
-# Finally, our objective is to minimize the transportation distance:
+# Finally, our objective is to minimize the shipping cost:
 
-@objective(model, Min, sum(distance(p, m) * x[p, m] for p in P, m in M))
+@objective(model, Min, sum(distance(p, m) * x[p, m] for p in P, m in M));
 
 # ## Solution
 
-optimize!(model)
+# Let's optimize and look at the solution:
 
+optimize!(model)
 solution_summary(model)
 
 # What's the optimal shipment?
 
-println("RESULTS:")
+assert_is_solved_and_feasible(model)
+Test.@test isapprox(objective_value(model), 1_680.0, atol = 1e-6)
 for p in P, m in M
     println(p, " => ", m, ": ", value(x[p, m]))
 end
-
-Test.@test termination_status(model) == OPTIMAL    #src
-Test.@test primal_status(model) == FEASIBLE_POINT  #src
-Test.@test objective_value(model) == 1_680.0           #src

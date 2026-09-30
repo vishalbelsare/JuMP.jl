@@ -20,32 +20,49 @@
 
 # # N-Queens
 
-# **Originally Contributed by**: Matthew Helm ([with help from @mtanneau on Julia Discourse](https://discourse.julialang.org/t/which-jump-jl-solver-for-this-problem/43350/17?u=mthelm85))
+# **This tutorial was originally contributed by Matthew Helm and Mathieu Tanneau.**
 
-# The N-Queens problem involves placing N queens on an N x N chessboard such
-# that none of the queens attacks another. In chess, a queen can move
-# vertically, horizontally, and diagonally so there cannot be more than one
-# queen on any given row, column, or diagonal.
+# This tutorial solves the N-Queens problem—placing N non-attacking queens on
+# an N×N chessboard—as a binary integer program in JuMP. It is a compact
+# example of how combinatorial feasibility problems can be modelled with row,
+# column, and diagonal constraints.
+#
+# **Learning intentions:**
+# * Model an N×N binary decision grid and enforce row and column exclusivity
+#   as equality constraints
+# * Enforce at-most-one-queen constraints on every diagonal by iterating over
+#   the diagonals of both the original and row-reversed matrix
+# * Recognize this as a pure feasibility problem with no objective, and extract
+#   the integer solution by rounding the continuous values returned by the solver
+
+# ## Required packages
+
+# This tutorial uses the following packages:
+
+using JuMP
+import HiGHS
+import LinearAlgebra
+
+# ## Formulation
+
+# Here is an example of an N-Queens problem with four queens.
 
 # ![Four Queens](../../assets/n_queens4.png)
 
 # *Note that none of the queens above are able to attack any other as a result
 # of their careful placement.*
 
-using JuMP
-import GLPK
-import LinearAlgebra
-
 # N-Queens
 N = 8
 
-model = Model(GLPK.Optimizer)
+model = Model(HiGHS.Optimizer)
+set_silent(model)
 
 # Next, let's create an N x N chessboard of binary values. 0 will represent an
 # empty space on the board and 1 will represent a space occupied by one of our
 # queens:
 
-@variable(model, x[1:N, 1:N], Bin)
+@variable(model, x[1:N, 1:N], Bin);
 
 # Now we can add our constraints:
 
@@ -56,18 +73,17 @@ for i in 1:N
 end
 
 # There can only be one queen on any given diagonal
-for i in -(N - 1):(N-1)
+for i in (-(N-1)):(N-1)
     @constraint(model, sum(LinearAlgebra.diag(x, i)) <= 1)
-    @constraint(model, sum(LinearAlgebra.diag(reverse(x, dims = 1), i)) <= 1)
+    @constraint(model, sum(LinearAlgebra.diag(reverse(x; dims = 1), i)) <= 1)
 end
 
-# That's it! We are ready to put our model to work and see if it is able to find
+# We are ready to put our model to work and see if it is able to find
 # a feasible solution:
 
 optimize!(model)
+assert_is_solved_and_feasible(model)
 
 # We can now review the solution that our model found:
 
-solution = convert.(Int, value.(x))
-
-# ![Four Queens](../../assets/n_queens.png)
+solution = round.(Int, value.(x))

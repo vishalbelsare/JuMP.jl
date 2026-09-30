@@ -20,31 +20,38 @@
 
 # # Sudoku
 
-# **Originally Contributed by**: Iain Dunning
+# **This tutorial was originally contributed by Iain Dunning.**
 
-# [Sudoku](http://en.wikipedia.org/wiki/Sudoku) is a popular number puzzle. The
-# goal is to place the digits 1,...,9 on a nine-by-nine grid, with some of the
-# digits already filled in. Your solution must satisfy the following rules:
+# This tutorial models [Sudoku](http://en.wikipedia.org/wiki/Sudoku) as both a
+# binary integer program and a constraint programming problem in JuMP, and solves
+# both formulations with HiGHS. Sudoku is a pure feasibility problem: the goal
+# is to place the digits 1-9 on a 9×9 grid such that each digit appears exactly
+# once in every row, column, and 3×3 sub-grid.
 #
-# * The numbers 1 to 9 must appear in each 3x3 square
-# * The numbers 1 to 9 must appear in each row
-# * The numbers 1 to 9 must appear in each column
+# **Learning intentions:**
+# * Formulate Sudoku as a binary integer program with a 9×9×9 variable grid,
+#   and encode cell, row, column, and sub-grid uniqueness as linear constraints
+# * Recognize Sudoku as a feasibility problem with no objective, fix the given
+#   digits using [`fix`](@ref), and extract the solution by rounding
+# * Re-formulate the same puzzle using the [`MOI.AllDifferent`](@ref) constraint
+#   programming set and verify that both formulations give the same answer
+
+# ## Required packages
+
+# This tutorial uses the following packages:
+
+using JuMP
+import HiGHS
+
+# ## Mixed-integer linear programming formulation
 
 # Here is a partially solved Sudoku problem:
 
 # ![Partially solved Sudoku](../../assets/partial_sudoku.png)
 
-# Solving a Sudoku isn't an optimization problem with an objective; its actually
-# a *feasibility* problem: we wish to find a feasible solution that satisfies
-# these rules. You can think of it as an optimization problem with an objective
-# of 0.
-#
 # We can model this problem using 0-1 integer programming: a problem where all
 # the decision variables are binary. We'll use JuMP to create the model, and
 # then we can solve it with any integer programming solver.
-
-using JuMP
-using GLPK
 
 # We will define a binary variable (a variable that is either 0 or 1) for each
 # possible number in each possible cell. The meaning of each variable is as
@@ -53,17 +60,19 @@ using GLPK
 # where `i` is the row and `j` is the column.
 
 # Create a model
-sudoku = Model(GLPK.Optimizer)
+
+sudoku = Model(HiGHS.Optimizer)
+set_silent(sudoku)
 
 # Create our variables
-@variable(sudoku, x[i = 1:9, j = 1:9, k = 1:9], Bin)
+@variable(sudoku, x[i=1:9, j=1:9, k=1:9], Bin);
 
 # Now we can begin to add our constraints. We'll actually start with something
 # obvious to us as humans, but what we need to enforce: that there can be only
 # one number per cell.
 
-for i in 1:9  ## For each row
-    for j in 1:9  ## and each column
+for i in 1:9  # For each row
+    for j in 1:9  # and each column
         ## Sum across all the possible digits. One and only one of the digits
         ## can be in this cell, so the sum must be equal to one.
         @constraint(sudoku, sum(x[i, j, k] for k in 1:9) == 1)
@@ -74,8 +83,8 @@ end
 # are all very similar, so much so that we can actually add them at the same
 # time.
 
-for ind in 1:9  ## Each row, OR each column
-    for k in 1:9  ## Each digit
+for ind in 1:9  # Each row, OR each column
+    for k in 1:9  # Each digit
         ## Sum across columns (j) - row constraint
         @constraint(sudoku, sum(x[ind, j, k] for j in 1:9) == 1)
         ## Sum across rows (i) - column constraint
@@ -83,7 +92,7 @@ for ind in 1:9  ## Each row, OR each column
     end
 end
 
-# Finally, we have the to enforce the constraint that each digit appears once in
+# Finally, we have to enforce the constraint that each digit appears once in
 # each of the nine 3x3 sub-grids. Our strategy will be to index over the
 # top-left corners of each 3x3 square with `for` loops, then sum over the
 # squares.
@@ -92,7 +101,7 @@ for i in 1:3:7
     for j in 1:3:7
         for k in 1:9
             ## i is the top left row, j is the top left column.
-            ## We'll sum from i to i+2, e.g. i=4, r=4, 5, 6.
+            ## We'll sum from i to i+2, for example, i=4, r=4, 5, 6.
             @constraint(
                 sudoku,
                 sum(x[r, c, k] for r in i:(i+2), c in j:(j+2)) == 1
@@ -130,9 +139,10 @@ end
 
 # solve problem
 optimize!(sudoku)
+assert_is_solved_and_feasible(sudoku)
 
 # Extract the values of x
-x_val = value.(x)
+x_val = value.(x);
 # Create a matrix to store the solution
 sol = zeros(Int, 9, 9)  # 9x9 matrix of integers
 for i in 1:9
@@ -154,3 +164,53 @@ sol
 # Which is the correct solution:
 
 # ![Solved Sudoku](../../assets/full_sudoku.png)
+
+# ## Constraint programming formulation
+
+# We can also model this problem using constraint programming and the
+# all-different constraint, which says that no two elements of a vector can take
+# the same value.
+
+# Because of the reformulation system in MathOptInterface, we can still solve
+# this problem using HiGHS.
+
+model = Model(HiGHS.Optimizer)
+set_silent(model)
+
+# Instead of the binary variables, we directly define a 9x9 grid of integer
+# values between 1 and 9:
+
+@variable(model, 1 <= x[1:9, 1:9] <= 9, Int);
+
+# Then, we enforce that the values in each row must be all-different:
+
+@constraint(model, [i = 1:9], x[i, :] in MOI.AllDifferent(9));
+
+# That the values in each column must be all-different:
+
+@constraint(model, [j = 1:9], x[:, j] in MOI.AllDifferent(9));
+
+# And that the values in each 3x3 sub-grid must be all-different:
+
+for i in (0, 3, 6), j in (0, 3, 6)
+    @constraint(model, vec(x[i .+ (1:3), j .+ (1:3)]) in MOI.AllDifferent(9))
+end
+
+# Finally, as before we set the initial solution and optimize:
+
+for i in 1:9, j in 1:9
+    if init_sol[i, j] != 0
+        fix(x[i, j], init_sol[i, j]; force = true)
+    end
+end
+
+optimize!(model)
+assert_is_solved_and_feasible(model)
+
+# Display the solution
+
+csp_sol = round.(Int, value.(x))
+
+# Which is the same as we found before:
+
+sol == csp_sol

@@ -3,32 +3,29 @@
 #  License, v. 2.0. If a copy of the MPL was not distributed with this
 #  file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-import SparseArrays
-import LinearAlgebra
-
 """
     SensitivityReport
 
 See [`lp_sensitivity_report`](@ref).
 """
-struct SensitivityReport
-    rhs::Dict{ConstraintRef,Tuple{Float64,Float64}}
-    objective::Dict{VariableRef,Tuple{Float64,Float64}}
+struct SensitivityReport{T}
+    rhs::Dict{ConstraintRef,Tuple{T,T}}
+    objective::Dict{GenericVariableRef{T},Tuple{T,T}}
 end
 
 Base.getindex(s::SensitivityReport, c::ConstraintRef) = s.rhs[c]
-Base.getindex(s::SensitivityReport, x::VariableRef) = s.objective[x]
+Base.getindex(s::SensitivityReport, x::GenericVariableRef) = s.objective[x]
 
 """
-    lp_sensitivity_report(model::Model; atol::Float64 = 1e-8)::SensitivityReport
+    lp_sensitivity_report(model::GenericModel{T}; atol::T = Base.rtoldefault(T))::SensitivityReport{T} where {T}
 
 Given a linear program `model` with a current optimal basis, return a
 [`SensitivityReport`](@ref) object, which maps:
 
- - Every variable reference to a tuple `(d_lo, d_hi)::Tuple{Float64,Float64}`,
+ - Every variable reference to a tuple `(d_lo, d_hi)::Tuple{T,T}`,
    explaining how much the objective coefficient of the corresponding variable
    can change by, such that the original basis remains optimal.
- - Every constraint reference to a tuple `(d_lo, d_hi)::Tuple{Float64,Float64}`,
+ - Every constraint reference to a tuple `(d_lo, d_hi)::Tuple{T,T}`,
    explaining how much the right-hand side of the corresponding constraint can
    change by, such that the basis remains optimal.
 
@@ -41,35 +38,76 @@ of the solver used to compute the basis.
 
 Note: interval constraints are NOT supported.
 
-# Example
+## Example
 
-    model = Model(GLPK.Optimizer)
-    @variable(model, -1 <= x <= 2)
-    @objective(model, Min, x)
-    optimize!(model)
-    report = lp_sensitivity_report(model; atol = 1e-7)
-    dx_lo, dx_hi = report[x]
-    println(
-        "The objective coefficient of `x` can decrease by \$dx_lo or " *
-        "increase by \$dx_hi."
-    )
-    c = LowerBoundRef(x)
-    dRHS_lo, dRHS_hi = report[c]
-    println(
-        "The lower bound of `x` can decrease by \$dRHS_lo or increase " *
-        "by \$dRHS_hi."
-    )
+```jldoctest
+julia> import HiGHS
+
+julia> model = Model(HiGHS.Optimizer);
+
+julia> set_silent(model)
+
+julia> @variable(model, -1 <= x <= 2)
+x
+
+julia> @objective(model, Min, x)
+x
+
+julia> optimize!(model)
+
+julia> report = lp_sensitivity_report(model; atol = 1e-7);
+
+julia> dx_lo, dx_hi = report[x]
+(-1.0, Inf)
+
+julia> println(
+           "The objective coefficient of `x` can decrease by \$dx_lo or " *
+           "increase by \$dx_hi."
+       )
+The objective coefficient of `x` can decrease by -1.0 or increase by Inf.
+
+julia> dRHS_lo, dRHS_hi = report[LowerBoundRef(x)]
+(-Inf, 3.0)
+
+julia> println(
+           "The lower bound of `x` can decrease by \$dRHS_lo or increase " *
+           "by \$dRHS_hi."
+       )
+The lower bound of `x` can decrease by -Inf or increase by 3.0.
+```
 """
-function lp_sensitivity_report(model::Model; atol::Float64 = 1e-8)
+function lp_sensitivity_report(
+    model::GenericModel{T};
+    atol::T = Base.rtoldefault(T),
+) where {T}
     if !_is_lp(model)
         error(
-            "Unable to compute LP sensitivity because model is not a linear " *
-            "program (or it contains interval constraints).",
+            """
+            Unable to compute LP sensitivity because the model is not a linear \
+            program, or it contains interval constraints.
+
+            Remove any nonlinear or integer components, and replace any interval \
+            constraints with separate upper and lower bound constraints.
+            """,
         )
     elseif !has_values(model)
-        error("Unable to compute LP sensitivity: no primal solution available.")
+        error(
+            """
+            Unable to compute LP sensitivity because no primal solution is available.
+
+            Call `optimize!(model)` and verify `has_values(model)` returns `true` \
+            before calling `lp_sensitivity_report`.
+            """,
+        )
     elseif !has_duals(model)
-        error("Unable to compute LP sensitivity: no dual solution available.")
+        error(
+            """
+            Unable to compute LP sensitivity because no dual solution is available.
+
+            Call `optimize!(model)` and verify `has_duals(model)` returns `true` \
+            before calling `lp_sensitivity_report`.
+            """,
+        )
     end
 
     std_form = _standard_form_matrix(model)
@@ -77,8 +115,12 @@ function lp_sensitivity_report(model::Model; atol::Float64 = 1e-8)
     B = std_form.A[:, basis.basic_cols]
     if size(B, 1) != size(B, 2)
         error(
-            "Unable to compute LP sensitivity: problem is degenerate. Try " *
-            "adding variable bounds to free variables",
+            """
+            Unable to compute LP sensitivity because the basis matrix is not square, \
+            which indicates the problem is degenerate.
+
+            Try adding bounds to free variables to obtain a non-degenerate basis.
+            """,
         )
     end
 
@@ -90,17 +132,21 @@ function lp_sensitivity_report(model::Model; atol::Float64 = 1e-8)
     l_B = @view std_form.lower[basis.basic_cols]
     u_B = @view std_form.upper[basis.basic_cols]
 
-    B_fact = LinearAlgebra.factorize(B)
-    d = Dict{Int,Vector{Float64}}(
+    B_fact = if size(B, 1) > 0
+        LinearAlgebra.lu(B)
+    else
+        zeros(Float64, (0, 0))
+    end
+    d = Dict{Int,Vector{T}}(
         # We call `collect` here because some Julia versions are missing sparse
         # matrix \ sparse vector fallbacks.
         j => B_fact \ collect(std_form.A[:, j]) for
-        j = 1:length(basis.basic_cols) if basis.basic_cols[j] == false
+        j in 1:length(basis.basic_cols) if basis.basic_cols[j] == false
     )
 
     report = SensitivityReport(
-        Dict{ConstraintRef,Tuple{Float64,Float64}}(),
-        Dict{VariableRef,Tuple{Float64,Float64}}(),
+        Dict{ConstraintRef,Tuple{T,T}}(),
+        Dict{GenericVariableRef{T},Tuple{T,T}}(),
     )
 
     ###
@@ -111,7 +157,7 @@ function lp_sensitivity_report(model::Model; atol::Float64 = 1e-8)
     # take the distance between the value of the constraint and the
     # corresponding bound. Otherwise, we need to compute a search direction as
     # in `_compute_rhs_range`. This is just the negative of the search direction
-    # computed above. Moreover, we have to be careful with doubly-bounded
+    # computed above. Moreover, we have to be careful with doubly bounded
     # variables, because our computed range doesn't take into account the
     # inactive bound.
 
@@ -142,7 +188,7 @@ function lp_sensitivity_report(model::Model; atol::Float64 = 1e-8)
     ### Compute objective sensitivity
     ###
 
-    π = Dict{Int,Float64}(
+    π = Dict{Int,T}(
         i => reduced_cost(var) for
         (var, i) in std_form.columns if basis.variables[i] != MOI.BASIC
     )
@@ -252,7 +298,7 @@ then our artificial entering variable is a duplicate of the `i`th variable, and
 
 If we are increasing the bounds associated with the `i`th affine constraint,
 then our artificial entering variable is a duplicate of the slack variable
-associated with the `i`th constraint, i.e., a `-1` in the `i`th row and zeros
+associated with the `i`th constraint, that is, a `-1` in the `i`th row and zeros
 everywhere else.
 
 In either case:
@@ -283,16 +329,20 @@ function _compute_rhs_range(d_B, x_B, l_B, u_B, atol)
 end
 
 """
-    _is_lp(model::Model)
+    _is_lp(model::GenericModel)
 
 Return `true` if `model` is a linear program.
 """
-function _is_lp(model::Model)
+function _is_lp(model::GenericModel)
+    AffType = Union{GenericVariableRef,GenericAffExpr}
+    if !(objective_function_type(model) <: AffType)
+        return false
+    end
     for (F, S) in list_of_constraint_types(model)
         # TODO(odow): support Interval constraints.
         if !(S <: Union{MOI.LessThan,MOI.GreaterThan,MOI.EqualTo})
             return false
-        elseif !(F <: Union{VariableRef,GenericAffExpr})
+        elseif !(F <: AffType)
             return false
         end
     end
@@ -300,140 +350,53 @@ function _is_lp(model::Model)
 end
 
 """
-    _standard_form_matrix(model::Model)
+    _standard_form_matrix(model::GenericModel)
 
-Given a problem:
-
-    r_l <= Ax <= r_u
-    c_l <=  x <= c_u
-
-Return the standard form:
-
-           [A -I] [x, y] = 0
-    [c_l, r_l] <= [x, y] <= [c_u, r_u]
-
-`columns` maps the variable references to column indices.
+See [`lp_matrix_data`](@ref) instead.
 """
-function _standard_form_matrix(model::Model)
-    columns = Dict(var => i for (i, var) in enumerate(all_variables(model)))
-    n = length(columns)
-    c_l, c_u = fill(-Inf, n), fill(Inf, n)
-    r_l, r_u = Float64[], Float64[]
-    I, J, V = Int[], Int[], Float64[]
-    bound_constraints = ConstraintRef[]
-    affine_constraints = ConstraintRef[]
-    for (F, S) in list_of_constraint_types(model)
-        _fill_standard_form(
-            model,
-            columns,
-            bound_constraints,
-            affine_constraints,
-            F,
-            S,
-            c_l,
-            c_u,
-            r_l,
-            r_u,
-            I,
-            J,
-            V,
-        )
-    end
+function _standard_form_matrix(model::GenericModel{T}) where {T}
+    matrix = lp_matrix_data(model)
+    I = SparseArrays.spdiagm(fill(-one(T), length(matrix.affine_constraints)))
     return (
-        columns = columns,
-        lower = vcat(c_l, r_l),
-        upper = vcat(c_u, r_u),
-        A = SparseArrays.sparse(I, J, V, length(r_l), n + length(r_l)),
-        bounds = bound_constraints,
-        constraints = affine_constraints,
+        columns = Dict(x => i for (i, x) in enumerate(matrix.variables)),
+        lower = vcat(matrix.x_lower, matrix.b_lower),
+        upper = vcat(matrix.x_upper, matrix.b_upper),
+        A = hcat(matrix.A, I),
+        bounds = matrix.variable_constraints,
+        constraints = matrix.affine_constraints,
     )
-end
-
-function _fill_standard_form(
-    model::Model,
-    x::Dict{VariableRef,Int},
-    bound_constraints::Vector{ConstraintRef},
-    ::Vector{ConstraintRef},
-    F::Type{VariableRef},
-    S::Type,
-    c_l::Vector{Float64},
-    c_u::Vector{Float64},
-    ::Vector{Float64},
-    ::Vector{Float64},
-    ::Vector{Int},
-    ::Vector{Int},
-    ::Vector{Float64},
-)
-    for c in all_constraints(model, F, S)
-        push!(bound_constraints, c)
-        c_obj = constraint_object(c)
-        i = x[c_obj.func]
-        set = MOI.Interval(c_obj.set)
-        c_l[i] = max(c_l[i], set.lower)
-        c_u[i] = min(c_u[i], set.upper)
-    end
-    return
-end
-
-function _fill_standard_form(
-    model::Model,
-    x::Dict{VariableRef,Int},
-    ::Vector{ConstraintRef},
-    affine_constraints::Vector{ConstraintRef},
-    F::Type{<:GenericAffExpr},
-    S::Type,
-    ::Vector{Float64},
-    ::Vector{Float64},
-    r_l::Vector{Float64},
-    r_u::Vector{Float64},
-    I::Vector{Int},
-    J::Vector{Int},
-    V::Vector{Float64},
-)
-    for c in all_constraints(model, F, S)
-        push!(affine_constraints, c)
-        c_obj = constraint_object(c)
-        @assert iszero(c_obj.func.constant)
-        row = length(r_l) + 1
-        set = MOI.Interval(c_obj.set)
-        push!(r_l, set.lower)
-        push!(r_u, set.upper)
-        for (var, coef) in c_obj.func.terms
-            push!(I, row)
-            push!(J, x[var])
-            push!(V, coef)
-        end
-        push!(I, row)
-        push!(J, length(x) + row)
-        push!(V, -1.0)
-    end
-    return
 end
 
 _convert_nonbasic_status(::MOI.LessThan) = MOI.NONBASIC_AT_UPPER
 _convert_nonbasic_status(::MOI.GreaterThan) = MOI.NONBASIC_AT_LOWER
 _convert_nonbasic_status(::Any) = MOI.NONBASIC
 
-function _try_get_constraint_basis_status(model::Model, constraint)
+function _try_get_constraint_basis_status(model::GenericModel, constraint)
     try
         return MOI.get(model, MOI.ConstraintBasisStatus(), constraint)
     catch
         error(
-            "Unable to query LP sensitivity information because this solver " *
-            "does not support querying the status of constraints in the " *
-            "optimal basis.",
+            """
+            Unable to compute LP sensitivity because the solver does not support \
+            querying the basis status of constraints.
+
+            Try a different LP solver that supports `MOI.ConstraintBasisStatus`.
+            """,
         )
     end
 end
 
-function _try_get_variable_basis_status(model::Model, variable)
+function _try_get_variable_basis_status(model::GenericModel, variable)
     try
         return MOI.get(model, MOI.VariableBasisStatus(), variable)
     catch
         error(
-            "Unable to query LP sensitivity information because this solver " *
-            "does not support querying the status of variables in the " *
-            "optimal basis.",
+            """
+            Unable to compute LP sensitivity because the solver does not support \
+            querying the basis status of variables.
+
+            Try a different LP solver that supports `MOI.VariableBasisStatus`.
+            """,
         )
     end
 end
@@ -443,7 +406,7 @@ _nonbasic_at_lower(::Any) = MOI.BASIC
 _nonbasic_at_upper(::MOI.LessThan) = MOI.NONBASIC_AT_UPPER
 _nonbasic_at_upper(::Any) = MOI.BASIC
 
-function _standard_form_basis(model::Model, std_form)
+function _standard_form_basis(model::GenericModel, std_form)
     variable_status = fill(MOI.BASIC, length(std_form.columns))
     bound_status = fill(MOI.BASIC, length(std_form.bounds))
     constraint_status = fill(MOI.BASIC, length(std_form.constraints))

@@ -3,18 +3,34 @@
 # v.2.0. If a copy of the MPL was not distributed with this file, You can       #src
 # obtain one at https://mozilla.org/MPL/2.0/.                                   #src
 
-# # Tips and tricks
+# # User-defined operators with vector outputs
 
-# This example collates some tips and tricks you can use when formulating
-# nonlinear programs. It uses the following packages:
+# This tutorial demonstrates how to write user-defined operators with
+# vector-valued outputs in JuMP, avoiding redundant computation when multiple
+# model components share an expensive function evaluation.
+#
+# **Learning intentions:**
+# * Understand why JuMP's scalar-output requirement causes redundant work when
+#   a vector-valued function is split into separate operators
+# * Implement a memoize helper that caches the most-recent result so that
+#   separate operators sharing common work each trigger only one evaluation
+# * Measure the reduction in function calls to confirm the memoized approach
+#   is more efficient than the naive split
+
+# !!! info
+#     As an alternative, see [The `VectorNonlinearOracle` set](@ref) tutorial.
+
+# ## Required packages
+
+# This tutorial uses the following packages:
 
 using JuMP
 import Ipopt
 import Test
 
-# ## User-defined functions with vector outputs
+# ## Motivation
 
-# A common situation is to have a user-defined function like the following that
+# A common situation is to have a user-defined operator like the following that
 # returns multiple outputs (we define `function_calls` to keep track of how
 # many times we call this method):
 
@@ -28,13 +44,13 @@ function foo(x, y)
 end
 
 # For example, the first term might be used in the objective, and the second
-# term might be used in a constraint, and often they share share work that is
+# term might be used in a constraint, and often they share work that is
 # expensive to evaluate.
 
-# This is a problem for JuMP, because it requires user-defined functions to
+# This is a problem for JuMP, because it requires user-defined operators to
 # return a single number. One option is to define two separate functions, the
-# first returning the first argument, and the second returning the second
-# argument.
+# first returning the first output, and the second returning the second
+# output.
 
 foo_1(x, y) = foo(x, y)[1]
 foo_2(x, y) = foo(x, y)[2]
@@ -46,16 +62,19 @@ foo_2(x, y) = foo(x, y)[2]
 model = Model(Ipopt.Optimizer)
 set_silent(model)
 @variable(model, x[1:2] >= 0, start = 0.1)
-register(model, :foo_1, 2, foo_1; autodiff = true)
-register(model, :foo_2, 2, foo_2; autodiff = true)
-@NLobjective(model, Max, foo_1(x[1], x[2]))
-@NLconstraint(model, foo_2(x[1], x[2]) <= 2)
+@operator(model, op_foo_1, 2, foo_1)
+@operator(model, op_foo_2, 2, foo_2)
+@objective(model, Max, op_foo_1(x[1], x[2]))
+@constraint(model, op_foo_2(x[1], x[2]) <= 2)
 function_calls = 0
 optimize!(model)
+assert_is_solved_and_feasible(model)
 Test.@test objective_value(model) ≈ √3 atol = 1e-4
 Test.@test value.(x) ≈ [1.0, 1.0] atol = 1e-4
+naive_approach = function_calls
 println("Naive approach: function calls = $(function_calls)")
-naive_approach = function_calls  #src
+
+# ## Memoization
 
 # An alternative approach is to use _memoization_, which uses a cache to store
 # the result of function evaluations. We can write a memoization function as
@@ -64,8 +83,8 @@ naive_approach = function_calls  #src
 """
     memoize(foo::Function, n_outputs::Int)
 
-Take a function `foo` and return a vector of length `n_outputs`, where each
-element is a function that returns the `i`'th output of `foo`.
+Take a function `foo` and return a vector of length `n_outputs`, where element
+`i` is a function that returns the equivalent of `foo(x...)[i]`.
 
 To avoid duplication of work, cache the most-recent evaluations of `foo`.
 Because `foo_i` is auto-differentiated with ForwardDiff, our cache needs to
@@ -76,12 +95,12 @@ function memoize(foo::Function, n_outputs::Int)
     last_dx, last_dfdx = nothing, nothing
     function foo_i(i, x::T...) where {T<:Real}
         if T == Float64
-            if x != last_x
+            if x !== last_x
                 last_x, last_f = x, foo(x...)
             end
             return last_f[i]::T
         else
-            if x != last_dx
+            if x !== last_dx
                 last_dx, last_dfdx = x, foo(x...)
             end
             return last_dfdx[i]::T
@@ -98,7 +117,7 @@ memoized_foo = memoize(foo, 2)
 
 function_calls = 0
 memoized_foo[1](1.0, 1.0)
-Test.@test function_calls == 1  #src
+Test.@test function_calls == 1
 println("function_calls = ", function_calls)
 
 # As expected, this evaluated the function once. However, if we call the
@@ -106,7 +125,7 @@ println("function_calls = ", function_calls)
 # `function_calls` is still `1`!
 
 memoized_foo[1](1.0, 1.0)
-Test.@test function_calls == 1  #src
+Test.@test function_calls == 1
 println("function_calls = ", function_calls)
 
 # Now let's see how this works during a real solve:
@@ -114,16 +133,17 @@ println("function_calls = ", function_calls)
 model = Model(Ipopt.Optimizer)
 set_silent(model)
 @variable(model, x[1:2] >= 0, start = 0.1)
-register(model, :foo_1, 2, memoized_foo[1]; autodiff = true)
-register(model, :foo_2, 2, memoized_foo[2]; autodiff = true)
-@NLobjective(model, Max, foo_1(x[1], x[2]))
-@NLconstraint(model, foo_2(x[1], x[2]) <= 2)
+@operator(model, op_foo_1, 2, memoized_foo[1])
+@operator(model, op_foo_2, 2, memoized_foo[2])
+@objective(model, Max, op_foo_1(x[1], x[2]))
+@constraint(model, op_foo_2(x[1], x[2]) <= 2)
 function_calls = 0
 optimize!(model)
+assert_is_solved_and_feasible(model)
 Test.@test objective_value(model) ≈ √3 atol = 1e-4
 Test.@test value.(x) ≈ [1.0, 1.0] atol = 1e-4
 println("Memoized approach: function_calls = $(function_calls)")
-Test.@test function_calls <= naive_approach / 2 + 1  #src
+Test.@test function_calls <= naive_approach / 2 + 1
 
 # Compared to the naive approach, the memoized approach requires half as many
-# function evaluations!
+# function evaluations.

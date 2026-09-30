@@ -1,57 +1,52 @@
 # Development roadmap
 
-This page is not JuMP documentation *per se* but are notes for the JuMP
-community. The JuMP developers have compiled this roadmap document to
-share their plans and goals. Contributions to roadmap issues are especially
+The JuMP developers have compiled this roadmap document to share their plans and
+goals with the JuMP community. Contributions to roadmap issues are especially
 invited.
 
-## JuMP 1.0
+Most of these issues will require changes to both JuMP and MathOptInterface, and
+are non-trivial in their implementation. They are in no particular order, but
+represent broad themes that we see as areas in which JuMP could be improved.
 
-JuMP 1.0 will be ready to release roughly when all of these tasks are completed.
-Some but not all of these tasks are summarized in the
-[JuMP 1.0 milestone](https://github.com/jump-dev/JuMP.jl/milestone/12).
+ - Support nonlinear expressions with vector-valued inputs and outputs. There
+   are a few related components:
+    - Representing terms like `log(det(X))` as necessary for `Convex.jl`
+    - Automatic differentiation of terms with vector inputs and outputs
+    - User-defined functions with vector--as opposed to scalar--inputs, which is
+      particularly useful for optimal control problems
+    - User-defined functions with vector outputs, avoiding the need for
+      [User-defined operators with vector outputs](@ref)
+ - Add support for modeling with SI units. The [UnitJuMP.jl](https://github.com/trulsf/UnitJuMP.jl)
+   extension is a good proof of concept for what this would look like. We want
+   to make units a first-class concept in JuMP. See [#1350](https://github.com/jump-dev/JuMP.jl/issues/1350)
+   for more details.
 
-- Create a website for JuMP (**Done**: [jump.dev](https://jump.dev))
-- Deprecate the JuliaOpt organization and move repositories to the
-  [JuMP-dev](https://github.com/JuMP-dev) organization (**Done**)
-- Address major regressions from JuMP 0.18
-  - Performance ([#1403](https://github.com/jump-dev/JuMP.jl/issues/1403),
-                 [#1654](https://github.com/jump-dev/JuMP.jl/issues/1654),
-                 [#1607](https://github.com/jump-dev/JuMP.jl/issues/1607))
-  - Callbacks (**Done**: see `examples/callbacks.jl`)
-  - Column generation syntax (**Done**: see `examples/cutting_stock_column_generation.jl`)
-  - Support for second-order cones in Gurobi, CPLEX, and Xpress (**Done**)
-- Fix issues that we promised MOI would fix
-  - Checking feasibility of solutions (**Done**: [#2466](https://github.com/jump-dev/JuMP.jl/pull/2466))
-  - Accessing IIS (**Done**: see [Conflicts](@ref))
-  - Accessing multiple results from solvers (**Done**: [Gurobi#392](https://github.com/jump-dev/Gurobi.jl/pull/392))
-  - Dual warm-starts (**Done**: [#2214](https://github.com/jump-dev/JuMP.jl/pull/2214))
-- Address "easy" usability issues
-  - Line numbers in error messages (**Done**: [#2276](https://github.com/jump-dev/JuMP.jl/pull/2276))
-  - LP sensitivity summary (**Done**: see [Sensitivity analysis for LP](@ref))
-  - Inferred element types for collections in macros (**Done**: [#2070](https://github.com/jump-dev/JuMP.jl/pull/2070))
-  - Expose solver-independent options from JuMP (**Done**: see [`set_silent`](@ref) etc.)
-- Improve the documentation ([#1062](https://github.com/jump-dev/JuMP.jl/issues/1062))
-  - Separate how-to, concept explanation, and technical reference following the
-    [Divio recommendations](https://www.divio.com/blog/documentation/) (**Done**)
-  - Fully integrate [JuMPTutorials](https://github.com/jump-dev/JuMPTutorials.jl)
-    with JuMP's documentation (**Done**)
-- Developer experience
-  - Get JuMP's unit tests running faster. See [#1745](https://github.com/jump-dev/JuMP.jl/pull/1745). (**Done**)
-- All solvers should complete the transition to MOI (**Done**)
-- Provide packages for installing Bonmin and Couenne (**Done**)
-- [MathOptFormat](https://github.com/odow/MathOptFormat.jl) 1.0 (**Done**)
+## Completed
 
-## MOI 1.0
-
-```@meta
-# TODO: List MOI 1.0 items here.
-```
-
-## Beyond JuMP 1.0
-
-```@meta
-# TODO: Copy over list of items not tied to JuMP 1.0. These should have more
-# elaborate explanations so that potential contributors know what we mean,
-# i.e., a few sentences each or a link to a document/issue.
-```
+ - **Done [#3106](https://github.com/jump-dev/JuMP.jl/pull/3106)** Make
+   nonlinear programming a first-class citizen. There have been many issues
+   and discussions about this: currently nonlinear constraints are handled
+   through a `MOI.NLPBlock` and have various limitations and restrictions.
+   - [https://github.com/jump-dev/JuMP.jl/issues/1185](https://github.com/jump-dev/JuMP.jl/issues/1185)
+   - [https://github.com/jump-dev/JuMP.jl/issues/1198](https://github.com/jump-dev/JuMP.jl/issues/1198)
+   - [https://github.com/jump-dev/JuMP.jl/issues/2788](https://github.com/jump-dev/JuMP.jl/issues/2788)
+   - [https://github.com/jump-dev/MathOptInterface.jl/issues/846](https://github.com/jump-dev/MathOptInterface.jl/issues/846)
+   - [https://github.com/jump-dev/MathOptInterface.jl/issues/1397](https://github.com/jump-dev/MathOptInterface.jl/issues/1397)
+ - **Done [#3385](https://github.com/jump-dev/JuMP.jl/pull/3385)** Add support for coefficient types other than `Float64`:
+   [https://github.com/jump-dev/JuMP.jl/issues/2025](https://github.com/jump-dev/JuMP.jl/issues/2025)
+   Since the very beginning, JuMP has hard-coded the coefficient type as
+   `Float64`. This has made it impossible to support solvers which can use other
+   types such as `BigFloat` or `Rational{BigInt}`.
+ - **Done [#3635](https://github.com/jump-dev/JuMP.jl/pull/3635)** Add support for constraint programming:
+   [https://github.com/jump-dev/JuMP.jl/issues/2227](https://github.com/jump-dev/JuMP.jl/issues/2227)
+   JuMP has a strong focus on linear, conic and nonlinear optimization problems.
+   We want to add better support for constraint programming.
+ - **Done [#3176](https://github.com/jump-dev/JuMP.jl/pull/3176)** Add support for multiobjective problems:
+   [https://github.com/jump-dev/JuMP.jl/issues/2099](https://github.com/jump-dev/JuMP.jl/issues/2099)
+   JuMP is restricted to problems with scalar-valued objectives. We want to
+   extend this to vector-valued problems.
+ - **Done [#3629](https://github.com/jump-dev/JuMP.jl/pull/3629)** Refactor the
+   internal code of JuMP's macros. The code in `src/macros.jl` is
+   some of the oldest part of JuMP and is difficult to read, modify, and extend.
+   We should overhaul the internals of JuMP's macros---without making
+   user-visible breaking changes---to improve their long-term maintainability.

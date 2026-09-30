@@ -20,10 +20,17 @@
 
 # # Getting started with JuMP
 
-# This tutorial is aimed at providing a quick introduction to writing and
-# solving optimization models with JuMP.
-
-# If you're new to Julia, start by reading [Getting started with Julia](@ref).
+# This tutorial provides a quick introduction to writing and solving
+# optimization models with JuMP. If you're new to Julia, start by reading
+# [Getting started with Julia](@ref).
+#
+# **Learning intentions:**
+# * Build and solve a linear program in JuMP by declaring variables,
+#   constraints, and an objective, then calling [`optimize!`](@ref)
+# * Query the solution using [`termination_status`](@ref),
+#   [`primal_status`](@ref), [`value`](@ref), and [`shadow_price`](@ref)
+# * Add variable bounds and vectorized constraints, and configure the solver
+#   with [`set_attribute`](@ref) and [`optimizer_with_attributes`](@ref)
 
 # ## What is JuMP?
 
@@ -41,7 +48,7 @@
 # A solver is a software package that incorporates algorithms for finding
 # solutions to one or more classes of problem.
 
-# For example, GLPK is a solver for linear programming (LP) and mixed integer
+# For example, HiGHS is a solver for linear programming (LP) and mixed integer
 # programming (MIP) problems. It incorporates algorithms such as the simplex
 # method and the interior-point method.
 
@@ -76,17 +83,17 @@
 # ```
 
 # You also need to include a Julia package which provides an appropriate solver.
-# One such solver is `GLPK.Optimizer`, which is provided by the
-# [GLPK.jl package](https://github.com/jump-dev/GLPK.jl).
+# One such solver is `HiGHS.Optimizer`, which is provided by the
+# [HiGHS.jl package](https://github.com/jump-dev/HiGHS.jl).
 # ```julia
 # import Pkg
-# Pkg.add("GLPK")
+# Pkg.add("HiGHS")
 # ```
 # See [Installation Guide](@ref) for a list of other solvers you can use.
 
 # ## An example
 
-# Let's to solve the following linear programming problem using JuMP and GLPK.
+# Let's solve the following linear programming problem using JuMP and HiGHS.
 # We will first look at the complete code to solve the problem and then go
 # through it step by step.
 
@@ -104,8 +111,8 @@
 # And here's the code to solve this problem:
 
 using JuMP
-using GLPK
-model = Model(GLPK.Optimizer)
+import HiGHS
+model = Model(HiGHS.Optimizer)
 @variable(model, x >= 0)
 @variable(model, 0 <= y <= 3)
 @objective(model, Min, 12x + 20y)
@@ -113,15 +120,14 @@ model = Model(GLPK.Optimizer)
 @constraint(model, c2, 7x + 12y >= 120)
 print(model)
 optimize!(model)
-@show termination_status(model)
-@show primal_status(model)
-@show dual_status(model)
-@show objective_value(model)
-@show value(x)
-@show value(y)
-@show shadow_price(c1)
-@show shadow_price(c2)
-nothing #hide
+termination_status(model)
+primal_status(model)
+dual_status(model)
+objective_value(model)
+value(x)
+value(y)
+shadow_price(c1)
+shadow_price(c2)
 
 # ## Step-by-step
 
@@ -130,42 +136,47 @@ nothing #hide
 using JuMP
 
 # We also need to include a Julia package which provides an appropriate solver.
-# We want to use `GLPK.Optimizer` here which is provided by the `GLPK.jl`
-# package.
+# We want to use `HiGHS.Optimizer` here which is provided by the `HiGHS.jl`
+# package:
 
-using GLPK
+import HiGHS
 
 # JuMP builds problems incrementally in a `Model` object. Create a model by
 # passing an optimizer to the [`Model`](@ref) function:
 
-model = Model(GLPK.Optimizer)
+model = Model(HiGHS.Optimizer)
 
 # Variables are modeled using [`@variable`](@ref):
 
 @variable(model, x >= 0)
 
-# They can have lower and upper bounds.
+# !!! info
+#     The macro creates a new Julia object, `x`, in the current scope. We could
+#     have made this more explicit by writing:
+#     ```julia
+#     x = @variable(model, x >= 0)
+#     ```
+#     but the macro does this automatically for us to save writing `x` twice.
 
-@variable(model, 0 <= y <= 30)
+# Variables can have lower and upper bounds:
+
+@variable(model, 0 <= y <= 3)
 
 # The objective is set using [`@objective`](@ref):
 
 @objective(model, Min, 12x + 20y)
 
 # Constraints are modeled using [`@constraint`](@ref). Here, `c1` and `c2` are
-# the names of our constraint.
+# the names of our constraints:
 
 @constraint(model, c1, 6x + 8y >= 100)
-
-#-
-
 @constraint(model, c2, 7x + 12y >= 120)
 
 # Call `print` to display the model:
 
 print(model)
 
-# To solve the optimization problem, call the [`optimize!`](@ref) function.
+# To solve the optimization problem, call the [`optimize!`](@ref) function:
 
 optimize!(model)
 
@@ -174,7 +185,13 @@ optimize!(model)
 #     Julia has a convention that functions which mutate their arguments should
 #     end in `!`. A common example is `push!`.
 
-# Now let's see what information we can query about the solution.
+# Now let's see what information we can query about the solution,
+# starting with [`is_solved_and_feasible`](@ref):
+
+is_solved_and_feasible(model)
+
+# We can get more information about the solution by querying the three types of
+# statuses.
 
 # [`termination_status`](@ref) tells us why the solver stopped:
 
@@ -201,18 +218,23 @@ objective_value(model)
 # the primal solution using [`value`](@ref):
 
 value(x)
-
-#-
-
 value(y)
 
 # and the dual solution using [`shadow_price`](@ref):
 
 shadow_price(c1)
-
-#-
-
 shadow_price(c2)
+
+# !!! warning
+#     You should always check whether the solver found a solution before calling
+#     solution functions like [`value`](@ref) or [`objective_value`](@ref). A
+#     common workflow is:
+#     ```julia
+#     optimize!(model)
+#     if !is_solved_and_feasible(model)
+#         error("Solver did not find an optimal solution")
+#     end
+#     ```
 
 # That's it for our simple model. In the rest of this tutorial, we expand on
 # some of the basic JuMP operations.
@@ -221,18 +243,18 @@ shadow_price(c2)
 
 # Create a model by passing an optimizer:
 
-model = Model(GLPK.Optimizer)
+model = Model(HiGHS.Optimizer)
 
 # Alternatively, call [`set_optimizer`](@ref) at any point before calling
 # [`optimize!`](@ref):
 
 model = Model()
-set_optimizer(model, GLPK.Optimizer)
+set_optimizer(model, HiGHS.Optimizer)
 
 # For some solvers, you can also use [`direct_model`](@ref), which offers a more
 # efficient connection to the underlying solver:
 
-model = direct_model(GLPK.Optimizer())
+model = direct_model(HiGHS.Optimizer())
 
 # !!! warning
 #     Some solvers do not support [`direct_model`](@ref)!
@@ -241,7 +263,8 @@ model = direct_model(GLPK.Optimizer())
 
 # Pass options to solvers with [`optimizer_with_attributes`](@ref):
 
-model = Model(optimizer_with_attributes(GLPK.Optimizer, "msg_lev" => 0))
+model =
+    Model(optimizer_with_attributes(HiGHS.Optimizer, "output_flag" => false))
 
 # !!! note
 #     These options are solver-specific. To find out the various options
@@ -249,10 +272,10 @@ model = Model(optimizer_with_attributes(GLPK.Optimizer, "msg_lev" => 0))
 #     link to each solver's GitHub page is in the [Supported solvers](@ref)
 #     table.
 
-# You can also pass options with [`set_optimizer_attribute`](@ref)
+# You can also pass options with [`set_attribute`](@ref):
 
-model = Model(GLPK.Optimizer)
-set_optimizer_attribute(model, "msg_lev", 0)
+model = Model(HiGHS.Optimizer)
+set_attribute(model, "output_flag", false)
 
 # ## Solution basics
 
@@ -264,15 +287,15 @@ set_optimizer_attribute(model, "msg_lev", 0)
 # recommended way to check:
 
 function solve_infeasible()
-    model = Model(GLPK.Optimizer)
+    model = Model(HiGHS.Optimizer)
     @variable(model, 0 <= x <= 1)
     @variable(model, 0 <= y <= 1)
     @constraint(model, x + y >= 3)
     @objective(model, Max, x + 2y)
     optimize!(model)
-    if termination_status(model) != OPTIMAL
+    if !is_solved_and_feasible(model)
         @warn("The model was not solved correctly.")
-        return nothing
+        return
     end
     return value(x), value(y)
 end
@@ -302,9 +325,6 @@ model = Model()
 # `lower_bound` and `upper_bound` functions.
 
 has_upper_bound(keyword_x)
-
-#-
-
 upper_bound(keyword_x)
 
 # Note querying the value of a bound that does not exist will result in an error.
@@ -323,7 +343,7 @@ end                         #hide
 
 # JuMP provides data structures for adding collections of variables to a model.
 # These data structures are referred to as _containers_ and are of three types:
-# `Arrays`, `DenseAxisArrays`, and `SparseAxisArrays`.
+# `Array`, [`Containers.DenseAxisArray`](@ref), and [`Containers.SparseAxisArray`](@ref).
 
 # #### Arrays
 
@@ -331,44 +351,70 @@ end                         #hide
 
 @variable(model, a[1:2, 1:2])
 
+# Index elements in `a` as follows:
+
+a[1, 1]
+
+#-
+
+a[2, :]
+
 # Create an n-dimensional variable $x \in {R}^n$ with bounds $l \le x \le u$
 # ($l, u \in {R}^n$) as follows:
 
 n = 10
-l = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-u = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+l = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+u = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 
-@variable(model, l[i] <= x[i = 1:n] <= u[i])
+@variable(model, l[i] <= x[i=1:n] <= u[i])
 
 # We can also create variable bounds that depend upon the indices:
 
-@variable(model, y[i = 1:2, j = 1:2] >= 2i + j)
+@variable(model, y[i=1:2, j=1:2] >= 2i + j)
 
 # #### DenseAxisArrays
 
-# `DenseAxisArrays` are used when the indices are not one-based integer ranges.
-# The syntax is similar except with an arbitrary vector as an index as opposed
-# to a one-based range:
+# [`Containers.DenseAxisArray`](@ref) is used when the indices are not one-based
+# integer ranges. The syntax is similar, except with an arbitrary vector as an
+# index as opposed to a one-based range:
 
-@variable(model, z[i = 2:3, j = 1:2:3] >= 0)
+@variable(model, z[i=2:3, j=1:2:3] >= 0)
 
 # Indices do not have to be integers. They can be any Julia type:
 
 @variable(model, w[1:5, ["red", "blue"]] <= 1)
 
+# Index elements in a [`Containers.DenseAxisArray`](@ref) as follows:
+
+z[2, 1]
+
+#-
+
+w[2:3, ["red", "blue"]]
+
+# See [Forcing the container type](@ref variable_forcing) for more details.
+
 # #### SparseAxisArrays
 
-# `SparseAxisArrays` are created when the indices do not form a rectangular set.
-# For example, this applies when indices have a dependence upon previous indices
-# (called triangular indexing):
+# A [`Containers.SparseAxisArray`](@ref) is created when the indices do not form
+# a Cartesian product. For example, this applies when indices have a dependence
+# upon previous indices (called triangular indexing):
 
-@variable(model, u[i = 1:2, j = i:3])
+@variable(model, u[i=1:2, j=i:3])
 
 # We can also conditionally create variables by adding a comparison check that
 # depends upon the named indices and is separated from the indices by a
 # semi-colon `;`:
 
 @variable(model, v[i = 1:9; mod(i, 3) == 0])
+
+# Index elements in a [`Containers.SparseAxisArray`](@ref) as follows:
+
+u[1, 2]
+
+#-
+
+v[[3, 6]]
 
 # ### Integrality
 
@@ -398,7 +444,7 @@ u = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
 
 # ## Constraint basics
 
-# We'll need a need a new model to explain some of the constraint  basics:
+# We'll need a new model to explain some of the constraint  basics:
 
 model = Model()
 @variable(model, x)
@@ -407,19 +453,26 @@ model = Model()
 
 # ### [Containers](@id tutorial_constraint_container)
 
-# Just as we had containers for variables, JuMP also provides `Arrays`,
-# `DenseAxisArrays`, and `SparseAxisArrays` for storing collections of
-# constraints. Examples for each container type are given below.
+# Just as we had containers for variables, JuMP also provides `Array`,
+# [`Containers.DenseAxisArray`](@ref), and [`Containers.SparseAxisArray`](@ref)
+# for storing collections of constraints. Examples for each container type are
+# given below.
 
 # #### Arrays
+
+# Create an `Array` of constraints:
 
 @constraint(model, [i = 1:3], i * x <= i + 1)
 
 # #### DenseAxisArrays
 
+# Create a [`Containers.DenseAxisArray`](@ref) of constraints:
+
 @constraint(model, [i = 1:2, j = 2:3], i * x <= j + 1)
 
 # #### SparseAxisArrays
+
+# Create a [`Containers.SparseAxisArray`](@ref) of constraints:
 
 @constraint(model, [i = 1:2, j = 1:2; i != j], i * x <= j + 1)
 
@@ -431,7 +484,7 @@ for i in 1:3
     @constraint(model, 6x + 4y >= 5i)
 end
 
-# or use for each loops inside the `@constraint` macro:
+# or use for each loops inside the [`@constraint`](@ref) macro:
 
 @constraint(model, [i in 1:3], 6x + 4y >= 5i)
 
@@ -443,23 +496,24 @@ end
 
 # Set an objective function with [`@objective`](@ref):
 
-model = Model(GLPK.Optimizer)
+model = Model(HiGHS.Optimizer)
 @variable(model, x >= 0)
 @variable(model, y >= 0)
 @objective(model, Min, 2x + y)
 
 # Create a maximization objective using `Max`:
+
 @objective(model, Max, 2x + y)
 
 # !!! tip
 #     Calling [`@objective`](@ref) multiple times will over-write the previous
 #     objective. This can be useful when you want to solve the same problem with
-#     different objectives:
+#     different objectives.
 
 # ## Vectorized syntax
 
 # We can also add constraints and an objective to JuMP using vectorized linear
-# algebra. We'll illustrate this by solving an LP in standard form i.e.
+# algebra. We'll illustrate this by solving an LP in standard form that is,
 
 # ```math
 # \begin{aligned}
@@ -469,24 +523,13 @@ model = Model(GLPK.Optimizer)
 # \end{aligned}
 # ```
 
-vector_model = Model(GLPK.Optimizer)
-
-A = [
-    1 1 9 5
-    3 5 0 8
-    2 0 6 13
-]
-
-b = [7; 3; 5]
-
-c = [1; 3; 5; 2]
-
+vector_model = Model(HiGHS.Optimizer)
+A = [1 1 9 5; 3 5 0 8; 2 0 6 13]
+b = [7, 3, 5]
+c = [1, 3, 5, 2]
 @variable(vector_model, x[1:4] >= 0)
 @constraint(vector_model, A * x .== b)
 @objective(vector_model, Min, c' * x)
-
 optimize!(vector_model)
-
-#-
-
+assert_is_solved_and_feasible(vector_model)
 objective_value(vector_model)

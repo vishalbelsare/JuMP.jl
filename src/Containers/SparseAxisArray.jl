@@ -5,38 +5,60 @@
 
 """
     struct SparseAxisArray{T,N,K<:NTuple{N, Any}} <: AbstractArray{T,N}
-        data::Dict{K,T}
+        data::OrderedCollections.OrderedDict{K,T}
     end
 
 `N`-dimensional array with elements of type `T` where only a subset of the
 entries are defined. The entries with indices `idx = (i1, i2, ..., iN)` in
-`keys(data)` has value `data[idx]`. Note that as opposed to
-`SparseArrays.AbstractSparseArray`, the missing entries are not assumed to be
-`zero(T)`, they are simply not part of the array. This means that the result of
-`map(f, sa::SparseAxisArray)` or `f.(sa::SparseAxisArray)` has the same sparsity
-structure than `sa` even if `f(zero(T))` is not zero.
+`keys(data)` has value `data[idx]`.
 
-## Examples
+Note that, as opposed to `SparseArrays.AbstractSparseArray`, the missing entries
+are not assumed to be `zero(T)`, they are simply not part of the array. This
+means that the result of `map(f, sa::SparseAxisArray)` or
+`f.(sa::SparseAxisArray)` has the same sparsity structure as `sa`, even if
+`f(zero(T))` is not zero.
 
-```jldoctest; setup=:(using JuMP)
-julia> dict = Dict((:a, 2) => 1.0, (:a, 3) => 2.0, (:b, 3) => 3.0)
-Dict{Tuple{Symbol,Int64},Float64} with 3 entries:
-  (:b, 3) => 3.0
+## Example
+
+```jldoctest
+julia> using OrderedCollections: OrderedDict
+
+julia> dict = OrderedDict((:a, 2) => 1.0, (:a, 3) => 2.0, (:b, 3) => 3.0)
+OrderedDict{Tuple{Symbol, Int64}, Float64} with 3 entries:
   (:a, 2) => 1.0
   (:a, 3) => 2.0
+  (:b, 3) => 3.0
 
-julia> array = JuMP.Containers.SparseAxisArray(dict)
-JuMP.Containers.SparseAxisArray{Float64,2,Tuple{Symbol,Int64}} with 3 entries:
-  [b, 3]  =  3.0
+julia> array = Containers.SparseAxisArray(dict)
+SparseAxisArray{Float64, 2, Tuple{Symbol, Int64}} with 3 entries:
   [a, 2]  =  1.0
   [a, 3]  =  2.0
+  [b, 3]  =  3.0
 
 julia> array[:b, 3]
 3.0
 ```
 """
 struct SparseAxisArray{T,N,K<:NTuple{N,Any}} <: AbstractArray{T,N}
-    data::Dict{K,T}
+    data::OrderedCollections.OrderedDict{K,T}
+    names::NTuple{N,Symbol}
+end
+
+function SparseAxisArray(
+    d::AbstractDict{K,T},
+    names::NTuple{N,Symbol},
+) where {T,N,K<:NTuple{N,Any}}
+    # convert(OrderedCollections.OrderedDict{K,T}, d) is deprecated, so use an
+    # iterator to get all key-value pairs.
+    od = OrderedCollections.OrderedDict{K,T}(k => v for (k, v) in d)
+    return SparseAxisArray(od, names)
+end
+
+function SparseAxisArray(
+    d::AbstractDict{K,T},
+    ::Nothing = nothing,
+) where {T,N,K<:NTuple{N,Any}}
+    return SparseAxisArray(d, ntuple(n -> Symbol("#$n"), N))
 end
 
 Base.length(sa::SparseAxisArray) = length(sa.data)
@@ -49,26 +71,29 @@ Base.hash(s::SparseAxisArray, h::UInt) = hash(s.data, h)
 
 function Base.size(::SparseAxisArray)
     return error(
-        "`Base.size` is not implemented for `SparseAxisArray` because " *
-        "although it is a subtype of `AbstractArray`, it is conceptually " *
-        "closer to a dictionary with `N`-dimensional keys. If you encounter " *
-        "this error and you didn't call `size` explicitly, it is because " *
-        "you called a method that is unsupported for `SparseAxisArray`s. " *
-        "Consult the JuMP documentation for a list of supported operations.",
+        """
+        `Base.size` is not implemented for `SparseAxisArray` because, \
+        although it is a subtype of `AbstractArray`, it is conceptually \
+        closer to a dictionary with N-dimensional keys.
+
+        If you did not call `size` explicitly, it is because you called a \
+        method that is unsupported for `SparseAxisArray`. Consult the JuMP \
+        documentation for a list of supported operations.
+        """,
     )
 end
 
 # A `length` argument can be given because `IteratorSize` is `HasLength`
 function Base.similar(
-    ::SparseAxisArray{S,N,K},
+    sa::SparseAxisArray{S,N,K},
     ::Type{T},
     length::Integer = 0,
 ) where {S,T,N,K}
-    d = Dict{K,T}()
+    d = OrderedCollections.OrderedDict{K,T}()
     if !iszero(length)
         sizehint!(d, length)
     end
-    return SparseAxisArray(d)
+    return SparseAxisArray(d, sa.names)
 end
 
 Base.mapreduce(f, op, sa::SparseAxisArray) = mapreduce(f, op, values(sa.data))
@@ -85,20 +110,6 @@ function Base.haskey(sa::SparseAxisArray{T,1,Tuple{I}}, idx::I) where {T,I}
     return haskey(sa.data, (idx,))
 end
 
-# Error for sa[..., :, ...]
-_colon_error() = nothing
-
-_colon_error(::Any, args...) = _colon_error(args...)
-
-function _colon_error(::Colon, args...)
-    return throw(
-        ArgumentError(
-            "Indexing with `:` is not supported by" *
-            " Containers.SparseAxisArray",
-        ),
-    )
-end
-
 function Base.setindex!(
     d::SparseAxisArray{T,N,K},
     value,
@@ -107,12 +118,58 @@ function Base.setindex!(
     return setindex!(d, value, idx...)
 end
 
-function Base.setindex!(d::SparseAxisArray{T,N}, value, idx...) where {T,N}
-    if length(idx) < N
-        throw(BoundsError(d, idx))
+function _kwargs_to_args(d::SparseAxisArray{T,N}; kwargs...) where {T,N}
+    if length(kwargs) != N
+        throw(BoundsError(d, kwargs))
     end
-    _colon_error(idx...)
-    return setindex!(d.data, value, idx)
+    return ntuple(N) do i
+        kw = keys(kwargs)[i]
+        if d.names[i] != kw
+            error(
+                """
+                Invalid index $kw in position $i.
+
+                When using keyword indexing, the indices must match the exact \
+                name and order used when creating the container.
+
+                Check the index names and their order in the container definition.
+                """,
+            )
+        end
+        return kwargs[i]
+    end
+end
+
+function Base.setindex!(
+    d::SparseAxisArray{T,N,K},
+    value,
+    args...;
+    kwargs...,
+) where {T,N,K}
+    if !isempty(kwargs)
+        if !isempty(args)
+            error(
+                """
+                Cannot index with a mix of positional and keyword arguments.
+
+                Use either all positional arguments, such as `A[i, j]`, or all keyword \
+                arguments, such as `A[dim1 = i, dim2 = j]`.
+                """,
+            )
+        end
+        return setindex!(d, value, _kwargs_to_args(d; kwargs...)...)
+    end
+    if length(args) != N
+        throw(BoundsError(d, args))
+    elseif _sliced_key_type(K, args...) !== nothing
+        throw(
+            ArgumentError(
+                "Slicing is not supported when calling `setindex!` on a" *
+                " SparseAxisArray",
+            ),
+        )
+    end
+    return setindex!(d.data, value, args)
 end
 
 function Base.getindex(
@@ -122,15 +179,99 @@ function Base.getindex(
     return getindex(d, idx...)
 end
 
-function Base.getindex(d::SparseAxisArray{T,N}, idx...) where {T,N}
-    if length(idx) < N
-        throw(BoundsError(d, idx))
+function Base.getindex(
+    d::SparseAxisArray{T,N,K},
+    args...;
+    kwargs...,
+) where {T,N,K}
+    if !isempty(kwargs)
+        if !isempty(args)
+            error(
+                """
+                Cannot index with a mix of positional and keyword arguments.
+
+                Use either all positional arguments, such as `A[i, j]`, or all keyword \
+                arguments, such as `A[dim1 = i, dim2 = j]`.
+                """,
+            )
+        end
+        return getindex(d, _kwargs_to_args(d; kwargs...)...)
     end
-    _colon_error(idx...)
-    return getindex(d.data, idx)
+    if length(args) != N
+        throw(BoundsError(d, args))
+    end
+    K2 = _sliced_key_type(K, args...)
+    if K2 !== nothing
+        new_data = OrderedCollections.OrderedDict{K2,T}(
+            _sliced_key(k, args) => v for (k, v) in d.data if _filter(k, args)
+        )
+        names = _sliced_key_name(K, d.names, args...)
+        return SparseAxisArray(new_data, names)
+    end
+    return getindex(d.data, args)
+end
+
+# Method to check whether an index is an attempt at a slice.
+@generated function _sliced_key_type(::Type{K}, idx...) where {K<:Tuple}
+    expr = Expr(:curly, :Tuple)
+    for i in 1:length(idx)
+        Ki = K.parameters[i]
+        if idx[i] <: Colon || idx[i] <: AbstractVector{<:Ki}
+            push!(expr.args, Ki)
+        end
+    end
+    return length(expr.args) == 1 ? :(nothing) : expr
+end
+
+@generated function _sliced_key_name(::Type{K}, names, args...) where {K<:Tuple}
+    expr = Expr(:tuple)
+    for i in 1:length(args)
+        Ki = K.parameters[i]
+        if args[i] <: Colon || args[i] <: AbstractVector{<:Ki}
+            push!(expr.args, Expr(:ref, :names, i))
+        end
+    end
+    return isempty(expr.args) ? nothing : expr
+end
+
+# Methods to check whether a key `k` is a valid subset of `idx`.
+_filter(::Any, ::Colon) = true
+_filter(ki::Any, i::Any) = ki == i
+_filter(ki::K, i::AbstractVector{<:K}) where {K} = ki in i
+_filter(::Tuple{}, ::Tuple{}) = true
+function _filter(k::Tuple, idx::Tuple)
+    return _filter(k[1], idx[1]) && _filter(Base.tail(k), Base.tail(idx))
+end
+
+# Methods to subset the key into a new key, dropping all singleton axes.
+_sliced_key(k, ::Any) = (k,)
+_sliced_key(::K, ::K) where {K} = ()
+_sliced_key(::Tuple{}, ::Tuple{}) = ()
+function _sliced_key(k::Tuple, idx::Tuple)
+    return tuple(
+        _sliced_key(k[1], idx[1])...,
+        _sliced_key(Base.tail(k), Base.tail(idx))...,
+    )
 end
 
 Base.eachindex(d::SparseAxisArray) = keys(d.data)
+
+function Base.eachindex(
+    ::IndexCartesian,
+    A::SparseAxisArray,
+    B::SparseAxisArray...,
+)
+    ret = eachindex(A)
+    for b in B
+        if eachindex(b) != ret
+            err = DimensionMismatch(
+                "incompatible dimensions in eachindex. Got $(eachindex.((A, B...)))",
+            )
+            throw(err)
+        end
+    end
+    return ret
+end
 
 ################
 # Broadcasting #
@@ -160,6 +301,16 @@ function Base.BroadcastStyle(
     return style
 end
 
+# Fix ambiguity
+function Base.BroadcastStyle(::BroadcastStyle, ::Base.Broadcast.Unknown)
+    return throw(
+        ArgumentError(
+            "Cannot broadcast Containers.SparseAxisArray with" *
+            " another array of different type",
+        ),
+    )
+end
+
 # The fallback uses `axes` but recommend in the docstring to create a custom
 # method for custom style if needed.
 function Base.Broadcast.instantiate(
@@ -179,10 +330,19 @@ end
 function Base.copy(
     bc::Base.Broadcast.Broadcasted{BroadcastStyle{N,K}},
 ) where {N,K}
-    dict = Dict(
-        index => bc.f(_get_arg(bc.args, index)...) for
-        index in _indices(bc.args...)
+    dict = OrderedCollections.OrderedDict(
+        index => _getindex(bc, index) for index in _indices(bc.args...)
     )
+    if isempty(dict) && dict isa OrderedCollections.OrderedDict{Any,Any}
+        # If `dict` is empty (for example, because there are no indices), then
+        # inference will produce a `OrderedCollections.OrderedDict{Any,Any}`,
+        # and we won't have enough type information to call
+        # `SparseAxisArray(dict)`. As a work-around, we explicitly construct the
+        # type of the resulting SparseAxisArray.
+        #
+        # For more, see JuMP issue #2867.
+        return SparseAxisArray{Any,N,K}(dict, ntuple(n -> Symbol("#$n"), N))
+    end
     return SparseAxisArray(dict)
 end
 
@@ -216,10 +376,17 @@ _indices(::Any, args...) = _indices(args...)
 
 function _indices(x::SparseAxisArray, args...)
     indices = keys(x.data)
-    # Now that we have some keys, check the remaining arugments for
+    # Now that we have some keys, check the remaining arguments for
     # SparseAxisArrays, and if we find one, check it has the same set of keys.
     _check_same_indices(indices, args...)
     return indices
+end
+
+function _indices(
+    bc::Base.Broadcast.Broadcasted{BroadcastStyle{N,K}},
+    args...,
+) where {N,K}
+    return _indices(bc.args...)
 end
 
 """
@@ -239,29 +406,45 @@ _getindex(x::SparseAxisArray, index) = getindex(x, index...)
 _getindex(x::Any, ::Any) = x
 _getindex(x::Ref, ::Any) = x[]
 
-@static if VERSION >= v"1.3"
-    # `broadcast_preserving_zero_d` calls `axes(A)` which calls `size(A)` which
-    # is not defined. When at least one argument is a `SparseAxisArray`, we can
-    # simply redirect `broadcast_preserving_zero_d` to `broadcast` since we know
-    # the result won't be zero dimensional.
+function _getindex(
+    bc::Base.Broadcast.Broadcasted{BroadcastStyle{N,K}},
+    index,
+) where {N,K}
+    return bc.f(_get_arg(bc.args, index)...)
+end
 
-    # Called by `A * 2`
-    function Base.Broadcast.broadcast_preserving_zero_d(
-        f,
-        A::SparseAxisArray,
-        As...,
-    )
-        return broadcast(f, A, As...)
-    end
-    # Called by `2 * A`
-    function Base.Broadcast.broadcast_preserving_zero_d(
-        f,
-        x,
-        A::SparseAxisArray,
-        As...,
-    )
-        return broadcast(f, x, A, As...)
-    end
+# `broadcast_preserving_zero_d` calls `axes(A)` which calls `size(A)` which
+# is not defined. When at least one argument is a `SparseAxisArray`, we can
+# simply redirect `broadcast_preserving_zero_d` to `broadcast` since we know
+# the result won't be zero dimensional.
+
+# Called by `A * 2`
+function Base.Broadcast.broadcast_preserving_zero_d(
+    f,
+    A::SparseAxisArray,
+    As...,
+)
+    return broadcast(f, A, As...)
+end
+
+# Called by `2 * A`
+function Base.Broadcast.broadcast_preserving_zero_d(
+    f,
+    x,
+    A::SparseAxisArray,
+    As...,
+)
+    return broadcast(f, x, A, As...)
+end
+
+# Fix an ambiguity if the user calls with multiple SparseAxisArray
+function Base.Broadcast.broadcast_preserving_zero_d(
+    f,
+    A::SparseAxisArray,
+    B::SparseAxisArray,
+    args...,
+)
+    return broadcast(f, A, B, args...)
 end
 
 ########
@@ -306,8 +489,7 @@ function Base.show(io::IOContext, x::SparseAxisArray)
         (i, (key, value)) in enumerate(x.data) if
         i < half_screen_rows || i > length(x) - half_screen_rows
     ]
-    sort!(key_strings; by = x -> x[1])
-    pad = maximum(length(x[1]) for x in key_strings)
+    pad = maximum((length(x[1]) for x in key_strings); init = 0)
     for (i, (key, value)) in enumerate(key_strings)
         print(io, "  [", rpad(key, pad), "]  =  ", value)
         if i != length(key_strings)

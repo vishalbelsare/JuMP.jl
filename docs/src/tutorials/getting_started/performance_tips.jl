@@ -20,96 +20,176 @@
 
 # # Performance tips
 
-# By now you should have read the other "getting started" tutorials. You're
-# almost ready to write your own models, but before you do so there are some
-# important things to be aware of.
+# Good performance in JuMP requires understanding a handful of patterns that
+# differ from general Julia advice. This tutorial highlights the most important
+# performance issues specific to JuMP, complementing the Julia manual's
+# [Performance tips](https://docs.julialang.org/en/v1/manual/performance-tips/index.html).
+#
+# **Learning intentions:**
+# * Use JuMP's macros (for example, [`@expression`](@ref), [`@constraint`](@ref))
+#   to build expressions efficiently and avoid unnecessary intermediate allocations
+# * Use [`add_to_expression!`](@ref) to accumulate terms in-place instead of
+#   via operator overloading
+# * Disable string name creation with [`set_string_names_on_creation`](@ref)
+#   for large models, and pre-compute non-zero index sets to skip
+#   zero-coefficient terms
 
-# ## Read the Julia performance tips
+# ## Required packages
 
-# The first thing to do is read the [Performance tips](https://docs.julialang.org/en/v1/manual/performance-tips/index.html)
-# section of the Julia manual. The most important rule is to avoid global
-# variables! This is particularly important if you're learning JuMP after using
-# a language like MATLAB.
+# This tutorial uses the following packages:
 
-using JuMP  # hide
-using GLPK  # hide
-
-# ## The "time-to-first-solve" issue
-
-# Similar to the infamous [time-to-first-plot](https://discourse.julialang.org/t/roadmap-for-a-faster-time-to-first-plot/22956)
-# plotting problem, JuMP suffers from time-to-first-solve latency. This latency
-# occurs because the first time you call JuMP code in each session, Julia needs
-# to compile a lot of code specific to your problem. This issue is actively being
-# worked on, but there are a few things you can do to improve things.
-
-# ### Don't call JuMP from the command line
-
-# In other languages, you might be used to a workflow like:
-# ```
-# $ julia my_script.jl
-# ```
-# This doesn't work for JuMP, because we have to pay the compilation latency
-# every time you run the script. Instead, use one of the [suggested workflows](https://docs.julialang.org/en/v1/manual/workflow-tips/)
-# from the Julia documentation.
-
-# ### Disable bridges if none are being used
-
-# At present, the majority of the latency problems are caused by JuMP's bridging
-# mechanism. If you only use constraints that are natively supported by the
-# solver, you can disable bridges by passing `add_bridges = false` to
-# [`Model`](@ref).
-
-model = Model(GLPK.Optimizer; add_bridges = false)
-
-# ### Use PackageCompiler
-
-# As a final option, consider using [PackageCompiler.jl](https://julialang.github.io/PackageCompiler.jl/dev/)
-# to [create a custom sysimage](https://julialang.github.io/PackageCompiler.jl/dev/examples/plots/).
-
-# This is a good option if you have finished prototyping a model, and you now
-# want to call it frequently from the command line without paying the
-# compilation price.
+using JuMP
+import HiGHS
 
 # ## Use macros to build expressions
 
-# ### What
-
-# Use JuMP's macros (or [`add_to_expression!`](@ref)) to build expressions.
-# Avoid constructing expressions outside the macros.
-
-# ### Why
+# Use JuMP's macros to build expressions.
 
 # Constructing an expression outside the macro results in intermediate copies of
 # the expression. For example,
 # ```julia
-# x[1] + x[2] + x[3]
+# result = x[1] + x[2] + x[3]
 # ```
 # is equivalent to
 # ```julia
-# a = x[1]
-# b = a + x[2]
-# c = b + x[3]
+# tmp = x[1] + x[2]
+# result = tmp + x[3]
 # ```
-# Since we only care about `c`, the `a` and `b` expressions are not needed and
-# constructing them slows the program down!
+# Since we only care about `result`, the `tmp` expression is not needed, and
+# constructing it slows the program down.
 
-# JuMP's macros rewrite the expressions to operate in-place and avoid these
-# extra copies. Because they allocate less memory, they are faster, particularly
+# JuMP's macros rewrite the expressions to operate in-place and avoid temporary
+# expressions. Because they allocate less memory, they are faster, particularly
 # for large expressions.
 
-# ### Example
+# Here's an example.
 
 model = Model()
 @variable(model, x[1:3])
-
-# Here's what happens if we construct the expression outside the macro:
-
+x[1] + x[2] + x[3]                                                 #hide
+@assert @allocated(x[1] + x[2] + x[3]) > 1000                      #hide
+@expression(model, x[1] + x[2] + x[3])                             #hide
+@assert @allocated(@expression(model, x[1] + x[2] + x[3])) < 1000  #hide
 @allocated x[1] + x[2] + x[3]
+@allocated @expression(model, x[1] + x[2] + x[3])
+
+# ## Use `add_to_expression!` to build summations
+
+# If you don't want to use the expression macros, use
+# [`add_to_expression!`](@ref) to build summations. For example, instead of:
+
+expr = zero(AffExpr)
+for i in 1:3
+    global expr  #hide
+    expr += x[i]
+end
+expr
+
+# do
+
+expr = zero(AffExpr)
+for i in 1:3
+    add_to_expression!(expr, x[i])
+end
+expr
+
+# The former is equivalent to:
+
+expr0 = zero(AffExpr)
+expr1 = expr0 + x[1]
+expr2 = expr1 + x[2]
+expr = expr2 + x[3]
+
+# which allocates four unique [`AffExpr`](@ref) objects. The latter efficiently
+# updates `expr` in-place so that only one [`AffExpr`](@ref) object is
+# allocated.
+
+# The function [`add_to_expression!`](@ref) also supports terms like `y += a * x`
+# where `a` is a constant. For example, instead of:
+
+expr = zero(AffExpr)
+for i in 1:3
+    global expr  #hide
+    expr += i * x[i]
+end
+expr
+
+# do
+
+expr = zero(AffExpr)
+for i in 1:3
+    add_to_expression!(expr, i, x[i])
+end
+expr
+
+# Don't do this, because `i * x[i]` will allocate a new [`AffExpr`](@ref) in
+# each iteration:
+
+expr = zero(AffExpr)
+for i in 1:3
+    add_to_expression!(expr, i * x[i])
+end
+expr
+
+# ## Disable string names
+
+# By default, JuMP creates `String` names for variables and constraints and
+# passes these to the solver. The benefit of passing names is that it improves
+# the readability of log messages from the solver (for example, "variable x has
+# invalid bounds" instead of "variable v1203 has invalid bounds"), but for
+# larger models the overhead of passing names can be non-trivial.
+
+# Disable the creation of `String` names by setting `set_string_name = false` in
+# the [`@variable`](@ref) and [`@constraint`](@ref) macros, or by calling
+# [`set_string_names_on_creation`](@ref) to disable all names for a particular
+# model:
+
+model = Model();
+set_string_names_on_creation(model, false)
+@variable(model, x)
+@constraint(model, c, 2x <= 1)
+
+# Note that this doesn't change how symbolic names and bindings are stored:
+
+x
+model[:x]
+x === model[:x]
+
+# But you can no longer look up the variable by the string name:
+
+variable_by_name(model, "x") === nothing
 
 # !!! info
-#     The `@allocated` measures how many bytes were allocated during the
-#     evaluation of an expression. Fewer is better.
+#     For more information on the difference between string names, symbolic
+#     names, and bindings, see
+#     [String names, symbolic names, and bindings](@ref variable_names_and_bindings).
 
-# If we use the [`@expression`](@ref) macro, we get many fewer allocations:
+# ## Sparsity
 
-@allocated @expression(model, x[1] + x[2] + x[3])
+# JuMP executes the code that you write without trying to be clever about
+# multiplication by `0.0`. For example, consider this model:
+
+d = 100_000
+a = zeros(d);
+a[3] = 1.0
+model = Model();
+@variable(model, x[1:d]);
+complicated_expression(x, i) = x[i]^2
+@expression(model, sum(a[i] * complicated_expression(x, i) for i in 1:d))
+
+# Although the final expression consists of  a single element, the sum is over
+# 100,000 elements, all but one of which are then multiplied by `0.0`. The
+# [`@expression`](@ref) line is equivalent to:
+
+expr = zero(QuadExpr)
+for i in 1:d
+    tmp = complicated_expression(x, i)
+    global expr = add_to_expression!(expr, a[i], tmp)
+end
+
+# Notice how we compute `complicated_expression` in every iteration, even though
+# most results will be discarded. You can improve the performance of model
+# construction by pre-computing the set of non-zero indices:
+
+indices = [i for i in 1:d if !iszero(a[i])]
+@expression(model, sum(a[i] * complicated_expression(x, i) for i in indices))
